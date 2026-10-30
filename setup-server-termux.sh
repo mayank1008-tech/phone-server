@@ -161,22 +161,31 @@ cat << 'EOF' > "$PREFIX/bin/status-server"
 #!/data/data/com.termux/files/usr/bin/bash
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
-# Check process IDs (dual-layer: root su if available, fallback to user space)
+# Check process IDs
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
-    SSH_PID=$(su -c 'pgrep -x sshd' 2>/dev/null | head -n 1)
-    TOR_PID=$(su -c 'pgrep -x tor' 2>/dev/null | head -n 1)
-    CONN_COUNT=$(su -c 'ss -tn state established sport = :8022 2>/dev/null' | grep -v Recv-Q | grep -c 8022 || echo 0)
-    if [ "$CONN_COUNT" -gt 0 ] 2>/dev/null; then
-        SESSIONS=$CONN_COUNT
-    else
-        RAW_WORKERS=$(su -c 'pgrep sshd-session' 2>/dev/null | wc -l)
-        SESSIONS=$(( ${RAW_WORKERS:-0} / 2 ))
+    SSH_PID=$(su -c "pgrep -x sshd" 2>/dev/null | head -n 1)
+    TOR_PID=$(su -c "pgrep -x tor" 2>/dev/null | head -n 1)
+    SSHD_PIDS=$(su -c "pgrep sshd-session" 2>/dev/null || true)
+    SHELL_COUNT=0
+    if [ -n "$SSHD_PIDS" ]; then
+        for p in $SSHD_PIDS; do
+            if su -c "ps -eo ppid,tty" 2>/dev/null | grep -E "^ *$p +pts/" >/dev/null 2>&1; then
+                SHELL_COUNT=$(( SHELL_COUNT + 1 ))
+            fi
+        done
     fi
 else
     SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
     TOR_PID=$(pgrep -x tor 2>/dev/null | head -n 1)
-    RAW_WORKERS=$(pgrep sshd-session 2>/dev/null | wc -l)
-    SESSIONS=$(( ${RAW_WORKERS:-0} / 2 ))
+    SSHD_PIDS=$(pgrep sshd-session 2>/dev/null || true)
+    SHELL_COUNT=0
+    if [ -n "$SSHD_PIDS" ]; then
+        for p in $SSHD_PIDS; do
+            if ps -eo ppid,tty 2>/dev/null | grep -E "^ *$p +pts/" >/dev/null 2>&1; then
+                SHELL_COUNT=$(( SHELL_COUNT + 1 ))
+            fi
+        done
+    fi
 fi
 
 # Fallback to direct TCP socket probes (bypasses SELinux process hiding)
@@ -216,7 +225,7 @@ else
     echo "  [-] Tor Daemon     : STOPPED"
 fi
 
-echo "  [*] Active Clients : $SESSIONS connected"
+echo "  [*] Active Shells  : $SHELL_COUNT open"
 echo "  [*] Auth Clients   : $AUTH_CLIENTS registered"
 
 if [ -n "$BATTERY" ]; then
