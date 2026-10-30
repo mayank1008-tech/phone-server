@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Stealth Tor v3 Phone Server - Master CLI & Interactive Interface
+# Stealth Tor v3 Phone Server - Master CLI & Interactive Dashboard
 # ==============================================================================
 # Unified CLI management tool for headless, zero-discovery Android servers
 # over stealth Tor v3 (x25519) and OpenSSH (Ed25519).
@@ -8,7 +8,7 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ANSI Colors
 RED='\033[0;31m'
@@ -41,34 +41,38 @@ show_help() {
     show_banner
     echo -e "${BOLD}USAGE:${NC}"
     echo "  phone-server [COMMAND] [OPTIONS]"
-    echo "  phone-server                       (Launches interactive menu)"
+    echo "  phone-server                         (Launches contextual interactive menu)"
     echo ""
-    echo -e "${BOLD}SETUP COMMANDS:${NC}"
-    echo "  setup server                       Run headless server installer on Android Termux"
-    echo "  setup client-linux [onion] [user]  Run client setup on Linux PC (Debian/Ubuntu/Fedora/Arch)"
-    echo "  setup client-termux [onion] [user] Run client setup on secondary Android phone"
+    echo -e "${BOLD}CLIENT COMMANDS (Workstation / 2nd Phone):${NC}"
+    echo "  connect [ssh-args]                   Open SSH shell into phone server (alias: ssh)"
+    echo "  status [--adb]                       Query remote phone server status over Tor"
+    echo "  stop [--adb]                         Shutdown remote server daemons over Tor"
+    echo "  restart [--adb]                      Restart remote server daemons over Tor"
+    echo "  setup client-linux [onion] [user]    Install Linux client dependencies & keys"
+    echo "  setup client-termux [onion] [user]   Install mobile Termux client dependencies & keys"
     echo ""
-    echo -e "${BOLD}OPERATIONAL COMMANDS (Client & Server):${NC}"
-    echo "  connect [ssh-args]                 Open SSH shell into phone server (alias: ssh)"
-    echo "  status [--adb]                     Check daemons, active clients, and battery"
-    echo "  start                              Start server daemons (OpenSSH & Tor) on phone"
-    echo "  stop [--adb]                       Force stop server daemons and active sessions"
-    echo "  restart [--adb]                    Cleanly restart server daemons"
-    echo "  authorize [name] [tor_pub] [ssh]   Authorize a new client device on phone server"
+    echo -e "${BOLD}SERVER COMMANDS (Run on Server Phone):${NC}"
+    echo "  start                                Start OpenSSH & Tor daemons on phone"
+    echo "  stop                                 Force terminate listeners & worker sessions"
+    echo "  restart                              Cleanly restart server daemons on phone"
+    echo "  status                               Check local PIDs, socket states, and battery"
+    echo "  authorize [name] [tor_pub] [ssh_pub] Register a new client device on server"
+    echo "  setup server                         Run full server installer on Android Termux"
     echo ""
-    echo -e "${BOLD}GENERAL OPTIONS:${NC}"
-    echo "  menu                               Open interactive selection menu"
-    echo "  install                            Install phone-server globally to PATH"
-    echo "  -v, --version, version             Display CLI version"
-    echo "  -h, --help, help                   Display this help message"
+    echo -e "${BOLD}MENU & GENERAL OPTIONS:${NC}"
+    echo "  client                               Open Client Dashboard interactive menu"
+    echo "  server                               Open Server Dashboard interactive menu"
+    echo "  install                              Install phone-server globally into system PATH"
+    echo "  -v, --version, version               Display CLI version"
+    echo "  -h, --help, help                     Display this help message"
     echo ""
     echo -e "${BOLD}EXAMPLES:${NC}"
-    echo "  phone-server                       # Launch interactive dropdown/menu"
-    echo "  phone-server status                # Check phone server health over Tor"
-    echo "  phone-server connect               # Open secure shell into phone"
-    echo "  phone-server connect uptime        # Run single command on phone"
-    echo "  phone-server setup client-linux    # Configure current Linux machine as client"
-    echo "  phone-server authorize laptop      # Register new client keys on server"
+    echo "  phone-server                         # Open interactive dashboard"
+    echo "  phone-server connect                 # Log into phone server"
+    echo "  phone-server status                  # Check phone server health"
+    echo "  phone-server authorize laptop        # Authorize client keys on server"
+    echo "  phone-server client                  # Launch Client menu"
+    echo "  phone-server server                  # Launch Server menu"
     echo "=================================================================="
 }
 
@@ -96,7 +100,148 @@ install_global() {
             fi
         done
         echo -e "${GREEN}[+] Installed to $TARGET (and alias stealth-server).${NC}"
-        echo -e "${YELLOW}[*] Make sure ~/.local/bin is in your PATH (e.g. source ~/.bashrc).${NC}"
+        echo -e "${YELLOW}[*] PATH updated in shell configuration.${NC}"
+    fi
+}
+
+# --- Client Implementation ---
+
+cmd_client_connect() {
+    if command -v phone-ssh >/dev/null 2>&1; then
+        phone-ssh "$@"
+    elif [ -x "$PREFIX/bin/phone-ssh" ]; then
+        "$PREFIX/bin/phone-ssh" "$@"
+    elif [ -x "$HOME/.local/bin/phone-ssh" ]; then
+        "$HOME/.local/bin/phone-ssh" "$@"
+    else
+        ssh phone-server "$@"
+    fi
+}
+
+cmd_client_status() {
+    if command -v status-server >/dev/null 2>&1; then
+        status-server "$@"
+    elif [ -x "$PREFIX/bin/status-server" ]; then
+        "$PREFIX/bin/status-server" "$@"
+    elif [ -x "$HOME/.local/bin/status-server" ]; then
+        "$HOME/.local/bin/status-server" "$@"
+    else
+        echo "[*] Connecting to Phone Server over Tor..."
+        if ! ssh -o ConnectTimeout=30 phone-server status-server "$@"; then
+            echo ""
+            echo -e "${YELLOW}[!] Could not reach Phone Server over Tor.${NC}"
+            echo "    Troubleshooting tips:"
+            echo "    1. If the server was recently started/restarted, Tor takes ~30-45 seconds"
+            echo "       to publish hidden service descriptors. Please wait a moment and retry."
+            echo "    2. Ensure phone server is powered on and plugged into a charger."
+            echo "    3. Ensure phone server has an active Wi-Fi or mobile data connection."
+            echo "    4. Ensure Termux wakelock is acquired on the server."
+        fi
+    fi
+}
+
+cmd_client_stop() {
+    if command -v stop-server >/dev/null 2>&1; then
+        stop-server "$@"
+    elif [ -x "$PREFIX/bin/stop-server" ]; then
+        "$PREFIX/bin/stop-server" "$@"
+    elif [ -x "$HOME/.local/bin/stop-server" ]; then
+        "$HOME/.local/bin/stop-server" "$@"
+    else
+        echo "[*] Sending stop signal to Phone Server over Tor..."
+        ssh -o ConnectTimeout=30 phone-server stop-server 2>/dev/null || true
+        echo "[+] Phone server daemons terminated successfully."
+    fi
+}
+
+cmd_client_restart() {
+    if command -v restart-server >/dev/null 2>&1; then
+        restart-server "$@"
+    elif [ -x "$PREFIX/bin/restart-server" ]; then
+        "$PREFIX/bin/restart-server" "$@"
+    elif [ -x "$HOME/.local/bin/restart-server" ]; then
+        "$HOME/.local/bin/restart-server" "$@"
+    else
+        echo "[*] Restarting Phone Server over Tor..."
+        ssh -o ConnectTimeout=30 phone-server restart-server "$@"
+    fi
+}
+
+# --- Server Implementation ---
+
+cmd_server_start() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        echo -e "${RED}[!] 'start' must be run directly on the Phone Server (Termux).${NC}"
+        exit 1
+    fi
+    if [ -x "$PREFIX/bin/start-server" ]; then
+        "$PREFIX/bin/start-server" "$@"
+    elif command -v start-server >/dev/null 2>&1; then
+        start-server "$@"
+    else
+        echo -e "${RED}[!] start-server not found. Run 'phone-server setup server' first.${NC}"
+        exit 1
+    fi
+}
+
+cmd_server_stop() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        # If on client machine, delegate to remote stop
+        cmd_client_stop "$@"
+        return
+    fi
+    if [ -x "$PREFIX/bin/stop-server" ]; then
+        "$PREFIX/bin/stop-server" "$@"
+    elif command -v stop-server >/dev/null 2>&1; then
+        stop-server "$@"
+    else
+        killall -9 tor sshd sshd-session 2>/dev/null || true
+        echo "[+] Server daemons stopped."
+    fi
+}
+
+cmd_server_restart() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        cmd_client_restart "$@"
+        return
+    fi
+    if [ -x "$PREFIX/bin/restart-server" ]; then
+        "$PREFIX/bin/restart-server" "$@"
+    elif command -v restart-server >/dev/null 2>&1; then
+        restart-server "$@"
+    else
+        cmd_server_stop
+        sleep 1
+        cmd_server_start
+    fi
+}
+
+cmd_server_status() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        cmd_client_status "$@"
+        return
+    fi
+    if [ -x "$PREFIX/bin/status-server" ]; then
+        "$PREFIX/bin/status-server" "$@"
+    elif command -v status-server >/dev/null 2>&1; then
+        status-server "$@"
+    else
+        echo -e "${RED}[!] status-server not found. Run 'phone-server setup server' first.${NC}"
+    fi
+}
+
+cmd_server_authorize() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        echo -e "${RED}[!] 'authorize' must be run directly on the Phone Server (Termux).${NC}"
+        echo "    Log into the phone first (phone-server connect) or run it on the phone screen."
+        exit 1
+    fi
+    if [ -x "$PREFIX/bin/authorize-client" ]; then
+        "$PREFIX/bin/authorize-client" "$@"
+    elif command -v authorize-client >/dev/null 2>&1; then
+        authorize-client "$@"
+    else
+        echo -e "${RED}[!] authorize-client not found. Run 'phone-server setup server' first.${NC}"
     fi
 }
 
@@ -106,8 +251,8 @@ cmd_setup() {
     case "$TARGET" in
         server)
             if [ "$IS_TERMUX" -ne 1 ]; then
-                echo -e "${RED}[!] Error: 'setup server' must be run inside Android Termux on your phone server!${NC}"
-                echo "    To set up on your phone, copy this repo to Termux and run: ./phone-server setup server"
+                echo -e "${RED}[!] Error: 'setup server' must be run inside Android Termux on your phone!${NC}"
+                echo "    To set up on your phone, open Termux and run: ./phone-server setup server"
                 exit 1
             fi
             if [ -f "$SCRIPT_DIR/setup-server-termux.sh" ]; then
@@ -118,12 +263,6 @@ cmd_setup() {
             fi
             ;;
         client-linux|client-pc)
-            if [ "$IS_TERMUX" -eq 1 ]; then
-                echo -e "${YELLOW}[!] Warning: You are running 'client-linux' inside Termux.${NC}"
-                echo "    For a secondary mobile client, run: phone-server setup client-termux"
-                read -p "Do you want to continue anyway? [y/N]: " CONFIRM
-                if [[ ! "$CONFIRM" =~ ^[yY]$ ]]; then exit 0; fi
-            fi
             if [ -f "$SCRIPT_DIR/setup-client-linux.sh" ]; then
                 bash "$SCRIPT_DIR/setup-client-linux.sh" "$@"
             else
@@ -146,168 +285,167 @@ cmd_setup() {
             ;;
         *)
             echo -e "${RED}[!] Unknown setup target: '$TARGET'${NC}"
-            echo "Available targets:"
-            echo "  • server         : Headless Android Termux server"
-            echo "  • client-linux   : Linux PC client (Debian, Ubuntu, Fedora, Arch)"
-            echo "  • client-termux  : Secondary Android phone client (Termux)"
+            echo "Available targets: server, client-linux, client-termux"
             exit 1
             ;;
     esac
 }
 
-cmd_connect() {
-    if command -v phone-ssh >/dev/null 2>&1; then
-        phone-ssh "$@"
-    elif [ -x "$PREFIX/bin/phone-ssh" ]; then
-        "$PREFIX/bin/phone-ssh" "$@"
-    elif [ -x "$HOME/.local/bin/phone-ssh" ]; then
-        "$HOME/.local/bin/phone-ssh" "$@"
-    else
-        ssh phone-server "$@"
-    fi
-}
+# --- Interactive Menus ---
 
-cmd_status() {
-    if command -v status-server >/dev/null 2>&1; then
-        status-server "$@"
-    elif [ -x "$PREFIX/bin/status-server" ]; then
-        "$PREFIX/bin/status-server" "$@"
-    elif [ -x "$HOME/.local/bin/status-server" ]; then
-        "$HOME/.local/bin/status-server" "$@"
-    else
-        ssh -o ConnectTimeout=20 phone-server status-server "$@"
-    fi
-}
-
-cmd_stop() {
-    if command -v stop-server >/dev/null 2>&1; then
-        stop-server "$@"
-    elif [ -x "$PREFIX/bin/stop-server" ]; then
-        "$PREFIX/bin/stop-server" "$@"
-    elif [ -x "$HOME/.local/bin/stop-server" ]; then
-        "$HOME/.local/bin/stop-server" "$@"
-    else
-        ssh -o ConnectTimeout=20 phone-server stop-server "$@"
-    fi
-}
-
-cmd_restart() {
-    if command -v restart-server >/dev/null 2>&1; then
-        restart-server "$@"
-    elif [ -x "$PREFIX/bin/restart-server" ]; then
-        "$PREFIX/bin/restart-server" "$@"
-    elif [ -x "$HOME/.local/bin/restart-server" ]; then
-        "$HOME/.local/bin/restart-server" "$@"
-    else
-        ssh -o ConnectTimeout=20 phone-server restart-server "$@"
-    fi
-}
-
-cmd_start() {
-    if [ -x "$PREFIX/bin/start-server" ]; then
-        "$PREFIX/bin/start-server" "$@"
-    elif command -v start-server >/dev/null 2>&1; then
-        start-server "$@"
-    else
-        echo -e "${RED}[!] 'start' can only be executed directly on the Phone Server (Termux).${NC}"
-        echo "    If you are on a client machine, connect first or use physical access."
-        exit 1
-    fi
-}
-
-cmd_authorize() {
-    if [ -x "$PREFIX/bin/authorize-client" ]; then
-        "$PREFIX/bin/authorize-client" "$@"
-    elif command -v authorize-client >/dev/null 2>&1; then
-        authorize-client "$@"
-    else
-        echo -e "${RED}[!] 'authorize' must be run directly on the Phone Server (Termux).${NC}"
-        exit 1
-    fi
-}
-
-interactive_menu() {
+menu_client() {
     while true; do
         clear 2>/dev/null || true
         show_banner
-        if [ "$IS_TERMUX" -eq 1 ]; then
-            echo -e "Platform: ${GREEN}Android Termux${NC} (Server / Mobile Client mode)"
-        else
-            echo -e "Platform: ${YELLOW}Linux Workstation${NC} (Client PC mode)"
-        fi
+        echo -e "Active Mode: ${GREEN}${BOLD}[CLIENT DASHBOARD]${NC} (Connecting to Phone Server)"
         echo "------------------------------------------------------------------"
-        echo -e "${BOLD}SETUP & INSTALLATION:${NC}"
-        echo "  1) 📱 Setup Server                 (Run on Android Phone to become Server)"
-        echo "  2) 💻 Setup Client - Linux PC      (Run on Linux PC to connect to Phone)"
-        echo "  3) 📲 Setup Client - Mobile Phone  (Run on 2nd Phone to connect to Phone)"
+        echo -e "${BOLD}CLIENT OPERATIONS:${NC}"
+        echo "  1) ⚡ Connect / Open Shell          (phone-ssh)"
+        echo "  2) 📊 Query Server Status           (Check PIDs, clients, battery)"
+        echo "  3) 🔄 Restart Server Remotely       (Clean cycle over Tor)"
+        echo "  4) 🛑 Stop Server Remotely          (Shutdown server over Tor)"
         echo ""
-        echo -e "${BOLD}SERVER MANAGEMENT & OPERATIONS:${NC}"
-        echo "  4) ⚡ Connect to Phone Server      (Open secure SSH shell)"
-        echo "  5) 📊 Check Server Status          (Query active PIDs, sockets, clients)"
-        echo "  6) 🔄 Restart Server Services      (Clean daemon cycle)"
-        echo "  7) 🛑 Stop Server Services         (Kill all listeners & worker sessions)"
-        echo "  8) 🔑 Authorize a New Client       (Register keys on server phone)"
+        echo -e "${BOLD}CLIENT CONFIGURATION:${NC}"
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            echo "  5) 📲 Configure Mobile Client       (setup-client-termux)"
+        else
+            echo "  5) 💻 Configure Linux Client        (setup-client-linux)"
+        fi
         echo ""
-        echo -e "${BOLD}MAINTENANCE & UTILITIES:${NC}"
-        echo "  9) ⚙️  Install 'phone-server' to PATH (Use command from anywhere)"
-        echo "  h) ❓ Show CLI Help & Syntax"
+        echo -e "${BOLD}SWITCH & ADVANCED:${NC}"
+        echo "  s) 📱 Switch to Server Management Menu"
+        echo "  i) ⚙️  Install 'phone-server' to PATH"
+        echo "  h) ❓ Show Help & CLI Syntax"
         echo "  0) 🚪 Exit"
         echo "------------------------------------------------------------------"
-        read -p "Select an option [0-9, h]: " CHOICE
+        read -p "Select an option [1-5, s, i, h, 0]: " CHOICE
         echo ""
 
         case "$CHOICE" in
             1)
-                cmd_setup server
-                read -p "Press Enter to return to menu..." _
+                cmd_client_connect
+                read -p "Session closed. Press Enter to return..." _
                 ;;
             2)
-                cmd_setup client-linux
-                read -p "Press Enter to return to menu..." _
+                cmd_client_status
+                echo ""
+                read -p "Press Enter to return..." _
                 ;;
             3)
-                cmd_setup client-termux
-                read -p "Press Enter to return to menu..." _
+                cmd_client_restart
+                echo ""
+                read -p "Press Enter to return..." _
                 ;;
             4)
-                cmd_connect
-                read -p "Session ended. Press Enter to return to menu..." _
+                cmd_client_stop
+                echo ""
+                read -p "Press Enter to return..." _
                 ;;
             5)
-                cmd_status
-                echo ""
-                read -p "Press Enter to return to menu..." _
+                if [ "$IS_TERMUX" -eq 1 ]; then
+                    cmd_setup client-termux
+                else
+                    cmd_setup client-linux
+                fi
+                read -p "Press Enter to return..." _
                 ;;
-            6)
-                cmd_restart
-                echo ""
-                read -p "Press Enter to return to menu..." _
+            s|S)
+                menu_server
+                return
                 ;;
-            7)
-                cmd_stop
-                echo ""
-                read -p "Press Enter to return to menu..." _
-                ;;
-            8)
-                cmd_authorize
-                echo ""
-                read -p "Press Enter to return to menu..." _
-                ;;
-            9)
+            i|I)
                 install_global
-                echo ""
-                read -p "Press Enter to return to menu..." _
+                read -p "Press Enter to return..." _
                 ;;
-            h|H|help)
+            h|H)
                 show_help
-                read -p "Press Enter to return to menu..." _
+                read -p "Press Enter to return..." _
                 ;;
             0|q|Q|exit)
                 echo "Goodbye!"
                 exit 0
                 ;;
             *)
-                echo -e "${RED}[!] Invalid option: '$CHOICE'${NC}"
+                echo -e "${RED}[!] Invalid option.${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+menu_server() {
+    while true; do
+        clear 2>/dev/null || true
+        show_banner
+        echo -e "Active Mode: ${YELLOW}${BOLD}[SERVER DASHBOARD]${NC} (Headless Phone Server)"
+        echo "------------------------------------------------------------------"
+        echo -e "${BOLD}SERVER OPERATIONS:${NC}"
+        echo "  1) 📊 Check Local Server Status     (PIDs, sockets, clients, battery)"
+        echo "  2) ▶️  Start Server Daemons          (Launch OpenSSH & Tor quietly)"
+        echo "  3) 🔄 Restart Server Daemons        (Clean cycle)"
+        echo "  4) 🛑 Stop Server Daemons           (Kill all listeners & sessions)"
+        echo "  5) 🔑 Authorize a New Client Device (Register laptop or mobile keys)"
+        echo ""
+        echo -e "${BOLD}SERVER CONFIGURATION:${NC}"
+        echo "  6) 📱 Run Server Setup / Reinstall  (setup-server-termux)"
+        echo ""
+        echo -e "${BOLD}SWITCH & ADVANCED:${NC}"
+        echo "  c) 💻 Switch to Client Mode Menu"
+        echo "  i) ⚙️  Install 'phone-server' to PATH"
+        echo "  h) ❓ Show Help & CLI Syntax"
+        echo "  0) 🚪 Exit"
+        echo "------------------------------------------------------------------"
+        read -p "Select an option [1-6, c, i, h, 0]: " CHOICE
+        echo ""
+
+        case "$CHOICE" in
+            1)
+                cmd_server_status
+                echo ""
+                read -p "Press Enter to return..." _
+                ;;
+            2)
+                cmd_server_start
+                echo ""
+                read -p "Press Enter to return..." _
+                ;;
+            3)
+                cmd_server_restart
+                echo ""
+                read -p "Press Enter to return..." _
+                ;;
+            4)
+                cmd_server_stop
+                echo ""
+                read -p "Press Enter to return..." _
+                ;;
+            5)
+                cmd_server_authorize
+                echo ""
+                read -p "Press Enter to return..." _
+                ;;
+            6)
+                cmd_setup server
+                read -p "Press Enter to return..." _
+                ;;
+            c|C)
+                menu_client
+                return
+                ;;
+            i|I)
+                install_global
+                read -p "Press Enter to return..." _
+                ;;
+            h|H)
+                show_help
+                read -p "Press Enter to return..." _
+                ;;
+            0|q|Q|exit)
+                echo "Goodbye!"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}[!] Invalid option.${NC}"
                 sleep 1
                 ;;
         esac
@@ -315,9 +453,15 @@ interactive_menu() {
 }
 
 # --- CLI Routing ---
+
 if [ $# -eq 0 ]; then
     if [ -t 0 ]; then
-        interactive_menu
+        # Default to Server Menu on Termux, Client Menu on Linux
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            menu_server
+        else
+            menu_client
+        fi
     else
         show_help
     fi
@@ -325,36 +469,86 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
+    # Client Submenu & Commands
+    client)
+        shift
+        if [ $# -eq 0 ]; then
+            menu_client
+        else
+            case "$1" in
+                connect|ssh) shift; cmd_client_connect "$@" ;;
+                status) shift; cmd_client_status "$@" ;;
+                stop) shift; cmd_client_stop "$@" ;;
+                restart) shift; cmd_client_restart "$@" ;;
+                setup) shift; cmd_setup "$@" ;;
+                *) echo -e "${RED}[!] Unknown client command: $1${NC}"; exit 1 ;;
+            esac
+        fi
+        ;;
+    # Server Submenu & Commands
+    server)
+        shift
+        if [ $# -eq 0 ]; then
+            menu_server
+        else
+            case "$1" in
+                start) shift; cmd_server_start "$@" ;;
+                stop) shift; cmd_server_stop "$@" ;;
+                restart) shift; cmd_server_restart "$@" ;;
+                status) shift; cmd_server_status "$@" ;;
+                authorize|auth) shift; cmd_server_authorize "$@" ;;
+                setup) shift; cmd_setup server "$@" ;;
+                *) echo -e "${RED}[!] Unknown server command: $1${NC}"; exit 1 ;;
+            esac
+        fi
+        ;;
+    # Direct Top-level Shortcuts
+    connect|ssh|login)
+        shift
+        cmd_client_connect "$@"
+        ;;
+    status)
+        shift
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            cmd_server_status "$@"
+        else
+            cmd_client_status "$@"
+        fi
+        ;;
+    start)
+        shift
+        cmd_server_start "$@"
+        ;;
+    stop)
+        shift
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            cmd_server_stop "$@"
+        else
+            cmd_client_stop "$@"
+        fi
+        ;;
+    restart)
+        shift
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            cmd_server_restart "$@"
+        else
+            cmd_client_restart "$@"
+        fi
+        ;;
+    authorize|auth)
+        shift
+        cmd_server_authorize "$@"
+        ;;
     setup)
         shift
         cmd_setup "$@"
         ;;
-    connect|ssh|login)
-        shift
-        cmd_connect "$@"
-        ;;
-    status)
-        shift
-        cmd_status "$@"
-        ;;
-    stop)
-        shift
-        cmd_stop "$@"
-        ;;
-    start)
-        shift
-        cmd_start "$@"
-        ;;
-    restart)
-        shift
-        cmd_restart "$@"
-        ;;
-    authorize|auth)
-        shift
-        cmd_authorize "$@"
-        ;;
     menu|tui)
-        interactive_menu
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            menu_server
+        else
+            menu_client
+        fi
         ;;
     install)
         install_global
