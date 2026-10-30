@@ -262,11 +262,19 @@ ln -sf "$PREFIX/bin/phone-ssh" "$PREFIX/bin/connect-server"
 
 chmod 755 "$PREFIX/bin/phone-ssh" "$PREFIX/bin/status-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/connect-server"
 
+# Install master phone-server CLI tool
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/phone-server" ]; then
+    cp "$SCRIPT_DIR/phone-server" "$PREFIX/bin/phone-server"
+    chmod 755 "$PREFIX/bin/phone-server"
+    ln -sf "$PREFIX/bin/phone-server" "$PREFIX/bin/stealth-server"
+fi
+
 # Dynamically apply exact SELinux MLS context if on Android root
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1 || true)
     if [ -n "$TERMUX_CTX" ]; then
-        su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/phone-ssh 2>/dev/null || true"
+        su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/phone-ssh $PREFIX/bin/phone-server 2>/dev/null || true"
     fi
 fi
 
@@ -275,9 +283,12 @@ echo -e "${GREEN}${BOLD}========================================================
 echo "               MOBILE CLIENT CONFIGURATION COMPLETE!              "
 echo "==================================================================${NC}"
 echo -e "Connect to your home phone server anytime by running:"
-echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}  or  ${YELLOW}${BOLD}phone-ssh${NC}"
+echo -e "${YELLOW}${BOLD}  phone-server${NC}       # Interactive menu"
+echo -e "${YELLOW}${BOLD}  phone-server status${NC}  # Check phone health"
+echo -e "${YELLOW}${BOLD}  phone-server connect${NC} # Shell login (or ssh phone-server)"
 echo ""
 echo "Companion commands available:"
+echo "  • phone-server   : Master CLI & interactive menu (alias: stealth-server)"
 echo "  • phone-ssh      : One-word shortcut to ssh into the server (multiplexed)"
 echo "  • status-server  : Query phone server status over Tor"
 echo "  • stop-server    : Force terminate phone server daemons remotely"

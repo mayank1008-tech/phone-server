@@ -281,6 +281,14 @@ EOF
 
 chmod +x "$HOME/.local/bin/status-server" "$HOME/.local/bin/stop-server" "$HOME/.local/bin/restart-server" "$HOME/.local/bin/phone-ssh"
 
+# Install master phone-server CLI tool
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/phone-server" ]; then
+    cp "$SCRIPT_DIR/phone-server" "$HOME/.local/bin/phone-server"
+    chmod +x "$HOME/.local/bin/phone-server"
+    ln -sf "$HOME/.local/bin/phone-server" "$HOME/.local/bin/stealth-server"
+fi
+
 # Ensure ~/.local/bin is in PATH in ~/.bashrc and ~/.zshrc if they exist
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ -f "$rc" ]; then
@@ -295,9 +303,12 @@ echo -e "${GREEN}${BOLD}========================================================
 echo "                   LINUX CLIENT CONFIGURATION COMPLETE!           "
 echo "==================================================================${NC}"
 echo -e "You can now connect to your phone server from anywhere in the world:"
-echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}  or  ${YELLOW}${BOLD}phone-ssh${NC}"
+echo -e "${YELLOW}${BOLD}  phone-server${NC}       # Interactive menu"
+echo -e "${YELLOW}${BOLD}  phone-server status${NC}  # Check phone health"
+echo -e "${YELLOW}${BOLD}  phone-server connect${NC} # Shell login (or ssh phone-server)"
 echo ""
 echo "Companion commands available:"
+echo "  • phone-server   : Master CLI & interactive menu (alias: stealth-server)"
 echo "  • phone-ssh      : Quick alias for ssh phone-server"
 echo "  • status-server  : Query phone server status over Tor (or pass --adb)"
 echo "  • stop-server    : Force terminate phone server daemons remotely"

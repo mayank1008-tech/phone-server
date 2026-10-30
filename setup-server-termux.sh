@@ -308,7 +308,15 @@ EOF
 
 chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client"
 
-# 6f. Autostart on boot (Termux:Boot support)
+# 6f. Install master phone-server CLI tool
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/phone-server" ]; then
+    cp "$SCRIPT_DIR/phone-server" "$PREFIX/bin/phone-server"
+    chmod 755 "$PREFIX/bin/phone-server"
+    ln -sf "$PREFIX/bin/phone-server" "$PREFIX/bin/stealth-server"
+fi
+
+# 6g. Autostart on boot (Termux:Boot support)
 mkdir -p "$HOME/.termux/boot"
 cat << 'EOF' > "$HOME/.termux/boot/start-phone-server.sh"
 #!/data/data/com.termux/files/usr/bin/bash
@@ -321,7 +329,7 @@ chmod 755 "$HOME/.termux/boot/start-phone-server.sh"
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1 || true)
     if [ -n "$TERMUX_CTX" ]; then
-        su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/authorize-client 2>/dev/null || true"
+        su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/authorize-client $PREFIX/bin/phone-server 2>/dev/null || true"
     fi
 fi
 
