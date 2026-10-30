@@ -121,7 +121,8 @@ echo ""
 
 # 5. Configure Tor Client Authorization Directory
 echo -e "${BLUE}[*] Step 4/5: Configuring Local Tor Client Authorization...${NC}"
-run_sudo mkdir -p /var/lib/tor/onion_auth
+run_sudo mkdir -p /etc/tor /var/lib/tor/onion_auth
+run_sudo touch /etc/tor/torrc
 run_sudo chmod 700 /var/lib/tor/onion_auth
 
 # Ensure ClientOnionAuthDir is enabled in torrc
@@ -159,7 +160,7 @@ if [ -n "$CLEAN_ONION" ]; then
     elif id debian-tor >/dev/null 2>&1; then
         TOR_USER="debian-tor"
     fi
-    run_sudo chown -R ${TOR_USER}:${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || true
+    run_sudo chown -R ${TOR_USER}:${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || run_sudo chown -R ${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || true
     echo -e "${GREEN}[+] Saved private authorization key to /var/lib/tor/onion_auth/phone.auth_private (Owner: $TOR_USER)${NC}"
     
     # Enable and restart Tor service
@@ -209,23 +210,31 @@ cat << 'EOF' > "$HOME/.local/bin/status-server"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
     sudo systemctl start tor tor@default 2>/dev/null || sudo service tor start 2>/dev/null || true
-    sleep 2
+    for i in $(seq 1 10); do
+        if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
 fi
 
-if [ "$1" == "--adb" ]; then
+if [ "$1" = "--adb" ]; then
+    shift
     echo "[*] Querying Phone Server status directly via ADB..."
-    adb shell '/data/data/com.termux/files/usr/bin/status-server'
+    adb shell '/data/data/com.termux/files/usr/bin/status-server' "$@"
     exit $?
 fi
 
 echo "[*] Connecting to Phone Server over Tor..."
-if ! ssh -o ConnectTimeout=20 phone-server status-server; then
+if ! ssh -o ConnectTimeout=30 phone-server status-server "$@"; then
     echo ""
     echo "[!] Could not reach Phone Server over Tor."
     echo "    Troubleshooting tips:"
-    echo "    1. Ensure phone server is powered on and connected to charger."
-    echo "    2. Ensure phone has an active Wi-Fi or mobile data connection."
-    echo "    3. Ensure Termux wakelock is acquired on the server."
+    echo "    1. If the server was recently started/restarted, Tor takes ~30-45 seconds"
+    echo "       to publish hidden service descriptors. Please wait a moment and retry."
+    echo "    2. Ensure phone server is powered on and connected to charger."
+    echo "    3. Ensure phone has an active Wi-Fi or mobile data connection."
+    echo "    4. Ensure Termux wakelock is acquired on the server."
 fi
 EOF
 
@@ -235,17 +244,23 @@ cat << 'EOF' > "$HOME/.local/bin/stop-server"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
     sudo systemctl start tor tor@default 2>/dev/null || sudo service tor start 2>/dev/null || true
-    sleep 2
+    for i in $(seq 1 10); do
+        if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
 fi
 
-if [ "$1" == "--adb" ]; then
+if [ "$1" = "--adb" ]; then
+    shift
     echo "[*] Stopping Phone Server directly via ADB..."
-    adb shell '/data/data/com.termux/files/usr/bin/stop-server'
+    adb shell '/data/data/com.termux/files/usr/bin/stop-server' "$@"
     exit $?
 fi
 
 echo "[*] Sending stop signal to Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server stop-server 2>/dev/null || true
+ssh -o ConnectTimeout=30 phone-server stop-server 2>/dev/null || true
 echo "[+] Phone server daemons terminated successfully."
 EOF
 
@@ -255,17 +270,23 @@ cat << 'EOF' > "$HOME/.local/bin/restart-server"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
     sudo systemctl start tor tor@default 2>/dev/null || sudo service tor start 2>/dev/null || true
-    sleep 2
+    for i in $(seq 1 10); do
+        if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
 fi
 
-if [ "$1" == "--adb" ]; then
+if [ "$1" = "--adb" ]; then
+    shift
     echo "[*] Restarting Phone Server directly via ADB..."
-    adb shell '/data/data/com.termux/files/usr/bin/restart-server'
+    adb shell '/data/data/com.termux/files/usr/bin/restart-server' "$@"
     exit $?
 fi
 
 echo "[*] Restarting Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server restart-server
+ssh -o ConnectTimeout=30 phone-server restart-server "$@"
 EOF
 
 # 8d. phone-ssh
@@ -274,7 +295,12 @@ cat << 'EOF' > "$HOME/.local/bin/phone-ssh"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
     sudo systemctl start tor tor@default 2>/dev/null || sudo service tor start 2>/dev/null || true
-    sleep 2
+    for i in $(seq 1 10); do
+        if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
 fi
 ssh phone-server "$@"
 EOF
@@ -283,8 +309,15 @@ chmod +x "$HOME/.local/bin/status-server" "$HOME/.local/bin/stop-server" "$HOME/
 
 # Install master phone-server CLI tool
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/phone-server" ]; then
-    cp "$SCRIPT_DIR/phone-server" "$HOME/.local/bin/phone-server"
+SOURCE_CLI="$SCRIPT_DIR/phone-server"
+if [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/stealth-tor-phone-server/phone-server" ]; then
+    SOURCE_CLI="$HOME/stealth-tor-phone-server/phone-server"
+elif [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/phone-server" ]; then
+    SOURCE_CLI="$HOME/phone-server"
+fi
+
+if [ -f "$SOURCE_CLI" ]; then
+    cp "$SOURCE_CLI" "$HOME/.local/bin/phone-server"
     chmod +x "$HOME/.local/bin/phone-server"
     ln -sf "$HOME/.local/bin/phone-server" "$HOME/.local/bin/stealth-server"
 fi

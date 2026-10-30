@@ -118,65 +118,95 @@ stealth-tor-phone-server/
 
 ---
 
-## 🕹️ Master CLI & Interactive Menu (`phone-server`)
+## 🕹️ Master CLI & Interactive Dashboards (`phone-server`)
 
 The project features a unified master CLI tool: **`phone-server`** (with global alias **`stealth-server`**).
 
-Running `phone-server` with no arguments launches an interactive text menu:
+Running `phone-server` with no arguments automatically detects your environment and launches the appropriate interactive dashboard:
 
-```bash
-./phone-server
-```
-
+#### 💻 Client Dashboard (Linux PC or Secondary Phone)
 ```text
 ==================================================================
-      🛡️  STEALTH TOR v3 PHONE SERVER CLI (v1.0.0)            
+      🛡️  STEALTH TOR v3 PHONE SERVER CLI (v1.2.0)            
 ==================================================================
-Platform: Linux Workstation (Client PC mode)
+Active Dashboard: [CLIENT MODE]
+Target Server   : <your-56-char-onion-address>.onion (via 127.0.0.1:9050)
 ------------------------------------------------------------------
-SETUP & INSTALLATION:
-  1) 📱 Setup Server                 (Run on Android Phone to become Server)
-  2) 💻 Setup Client - Linux PC      (Run on Linux PC to connect to Phone)
-  3) 📲 Setup Client - Mobile Phone  (Run on 2nd Phone to connect to Phone)
+CLIENT OPERATIONS:
+  1) ⚡ Connect / Open Shell          (phone-ssh)
+  2) 📊 Query Server Status           (Check PIDs, clients, battery)
+  3) 🔄 Restart Server Remotely       (Clean cycle over Tor)
+  4) 🛑 Stop Server Remotely          (Shutdown server over Tor)
 
-SERVER MANAGEMENT & OPERATIONS:
-  4) ⚡ Connect to Phone Server      (Open secure SSH shell)
-  5) 📊 Check Server Status          (Query active PIDs, sockets, clients)
-  6) 🔄 Restart Server Services      (Clean daemon cycle)
-  7) 🛑 Stop Server Services         (Kill all listeners & worker sessions)
-  8) 🔑 Authorize a New Client       (Register keys on server phone)
+CLIENT CONFIGURATION:
+  5) 💻 Configure Linux PC Client     (setup-client-linux)
+  6) 📲 Configure Mobile Phone Client (setup-client-termux)
 
-MAINTENANCE & UTILITIES:
-  9) ⚙️  Install 'phone-server' to PATH (Use command from anywhere)
-  h) ❓ Show CLI Help & Syntax
+SWITCH & ADVANCED:
+  s) 📱 Switch to Server Management Menu
+  i) ⚙️  Install 'phone-server' to PATH
+  h) ❓ Show Help & CLI Syntax
   0) 🚪 Exit
 ------------------------------------------------------------------
-Select an option [0-9, h]: 
+Select an option [1-6, s, i, h, 0]: 
 ```
 
-### CLI Command-Line Syntax & `--help`
+#### 📱 Server Dashboard (Termux Server Phone)
+```text
+==================================================================
+      🛡️  STEALTH TOR v3 PHONE SERVER CLI (v1.2.0)            
+==================================================================
+Active Dashboard: [SERVER MODE]
+Server Onion    : <your-56-char-onion-address>.onion
+Server User     : u0_a300
+------------------------------------------------------------------
+SERVER OPERATIONS:
+  1) 📊 Check Local Server Status     (PIDs, sockets, clients, battery)
+  2) ▶️  Start Server Daemons          (Launch OpenSSH & Tor quietly)
+  3) 🔄 Restart Server Daemons        (Clean cycle)
+  4) 🛑 Stop Server Daemons           (Kill all listeners & sessions)
+  5) 🔑 Authorize a New Client Device (Register laptop or mobile keys)
 
-For non-interactive scripting and terminal automation, `phone-server` supports complete subcommands and flags:
+SERVER CONFIGURATION:
+  6) 📱 Run Server Setup / Reinstall  (setup-server-termux)
+
+SWITCH & ADVANCED:
+  c) 💻 Switch to Client Mode Menu
+  i) ⚙️  Install 'phone-server' to PATH
+  h) ❓ Show Help & CLI Syntax
+  0) 🚪 Exit
+------------------------------------------------------------------
+Select an option [1-6, c, i, h, 0]: 
+```
+
+### CLI Command-Line Syntax & Subcommands
+
+For terminal automation, cron jobs, and quick one-liners, `phone-server` provides complete subcommands:
 
 ```bash
 phone-server --help
 ```
 
-| Command | Usage | Description |
+| Scope | Command | Description |
 | :--- | :--- | :--- |
-| **`phone-server`** | `phone-server` | Launches interactive menu. |
-| **`--help` / `-h`** | `phone-server --help` | Displays command syntax, examples, and options. |
-| **`--version` / `-v`** | `phone-server -v` | Displays version information (`v1.0.0`). |
-| **`setup server`** | `phone-server setup server` | Runs server setup on Android Termux. |
-| **`setup client-linux`** | `phone-server setup client-linux [onion] [user]` | Configures current Linux PC as client. |
-| **`setup client-termux`** | `phone-server setup client-termux [onion] [user]` | Configures current Android phone as client. |
-| **`connect`** | `phone-server connect [args]` | Opens SSH shell (alias: `phone-server ssh`). |
-| **`status`** | `phone-server status [--adb]` | Queries live server health over Tor (or via USB). |
-| **`start`** | `phone-server start` | Starts daemons (directly on phone). |
-| **`stop`** | `phone-server stop [--adb]` | Force-kills daemons and active sessions remotely. |
-| **`restart`** | `phone-server restart [--adb]` | Cycles server daemons remotely. |
-| **`authorize`** | `phone-server authorize [name]` | Registers a new client on the server. |
-| **`install`** | `phone-server install` | Installs `phone-server` globally to system PATH. |
+| **Global** | `phone-server` | Launches contextual interactive dashboard (Client or Server). |
+| **Global** | `phone-server client` | Opens Client Dashboard explicitly. |
+| **Global** | `phone-server server` | Opens Server Dashboard explicitly. |
+| **Global** | `phone-server install` | Installs `phone-server` and `stealth-server` globally into PATH. |
+| **Global** | `phone-server -h` / `--help` | Displays command syntax, examples, and flags. |
+| **Global** | `phone-server -v` / `--version` | Displays CLI version (`v1.2.0`). |
+| **Client** | `phone-server connect [ssh-args]` | Opens SSH shell into phone server (alias: `phone-server ssh`). |
+| **Client** | `phone-server status [--adb]` | Queries remote phone server health over Tor (or via USB ADB). |
+| **Client** | `phone-server stop [--adb]` | Sends remote stop signal to terminate daemons over Tor. |
+| **Client** | `phone-server restart [--adb]` | Sends remote restart signal to cycle daemons over Tor. |
+| **Client** | `phone-server setup client-linux` | Installs Linux client dependencies & generates keys. |
+| **Client** | `phone-server setup client-termux` | Installs mobile Termux client dependencies & generates keys. |
+| **Server** | `phone-server start` | Launches OpenSSH and Tor daemons locally on phone. |
+| **Server** | `phone-server stop` | Terminates listeners and active worker sessions on phone. |
+| **Server** | `phone-server restart` | Cleanly terminates and relaunches daemons on phone. |
+| **Server** | `phone-server status` | Queries local PIDs, sockets, active shells, and battery. |
+| **Server** | `phone-server authorize [name]` | Registers a new client device on server. |
+| **Server** | `phone-server setup server` | Runs full server installer on Android Termux. |
 
 ---
 
@@ -512,9 +542,11 @@ cat $PREFIX/var/lib/tor/client_tor.log
 
 ---
 
-### 2. `Connection timed out during banner exchange`
-* **Cause**: The server phone has entered deep sleep (Doze mode) or the Wi-Fi chip went into power-saving mode.
-* **Fix**:
+### 2. `Connection timed out during banner exchange` / Port 65535 timeout
+* **Cause 1 (Cold Start Latency)**: If the server or Tor was started or restarted within the last 30-45 seconds, Tor is still bootstrapping circuits and publishing its encrypted v3 hidden service descriptor to HSDir directory authorities.
+* **Fix 1**: Wait 30-45 seconds and retry. Once the descriptor is published, connection is established.
+* **Cause 2 (Android Sleep / Doze)**: The server phone has entered deep sleep (Doze mode) or the Wi-Fi chip went into power-saving mode.
+* **Fix 2**:
   1. Ensure the phone is connected to a wall charger.
   2. Pull down the Android notification shade, locate the Termux notification, and tap **"Acquire Wakelock"**.
   3. On rooted phones, verify that sleep suppression is active:

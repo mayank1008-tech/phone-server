@@ -103,7 +103,8 @@ echo ""
 
 # 5. Configure Client Tor Authorization Directory
 echo -e "${BLUE}[*] Step 4/5: Configuring Client Tor Directory...${NC}"
-mkdir -p "$PREFIX/var/lib/tor/onion_auth"
+mkdir -p "$PREFIX/etc/tor" "$PREFIX/var/lib/tor/onion_auth"
+touch "$PREFIX/etc/tor/torrc"
 chmod 700 "$PREFIX/var/lib/tor/onion_auth"
 
 if ! grep -q "ClientOnionAuthDir" "$PREFIX/etc/tor/torrc" 2>/dev/null; then
@@ -210,13 +211,15 @@ if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     done
 fi
 echo "[*] Connecting to Phone Server over Tor..."
-if ! ssh -o ConnectTimeout=20 phone-server status-server; then
+if ! ssh -o ConnectTimeout=30 phone-server status-server "$@"; then
     echo ""
     echo "[!] Could not reach Phone Server over Tor."
     echo "    Troubleshooting tips:"
-    echo "    1. Ensure phone server is powered on and connected to charger."
-    echo "    2. Ensure phone server has an active Wi-Fi or mobile data connection."
-    echo "    3. Ensure Termux wakelock is acquired on the server."
+    echo "    1. If the server was recently started/restarted, Tor takes ~30-45 seconds"
+    echo "       to publish hidden service descriptors. Please wait a moment and retry."
+    echo "    2. Ensure phone server is powered on and connected to charger."
+    echo "    3. Ensure phone server has an active Wi-Fi or mobile data connection."
+    echo "    4. Ensure Termux wakelock is acquired on the server."
 fi
 EOF
 
@@ -235,7 +238,7 @@ if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     done
 fi
 echo "[*] Sending stop signal to Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server stop-server 2>/dev/null || true
+ssh -o ConnectTimeout=30 phone-server stop-server 2>/dev/null || true
 echo "[+] Phone server daemons terminated successfully."
 EOF
 
@@ -254,7 +257,7 @@ if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     done
 fi
 echo "[*] Restarting Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server restart-server
+ssh -o ConnectTimeout=30 phone-server restart-server "$@"
 EOF
 
 # For convenience, link connect-server as well
@@ -264,8 +267,17 @@ chmod 755 "$PREFIX/bin/phone-ssh" "$PREFIX/bin/status-server" "$PREFIX/bin/stop-
 
 # Install master phone-server CLI tool
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/phone-server" ]; then
-    cp "$SCRIPT_DIR/phone-server" "$PREFIX/bin/phone-server"
+SOURCE_CLI="$SCRIPT_DIR/phone-server"
+if [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/stealth-tor-phone-server/phone-server" ]; then
+    SOURCE_CLI="$HOME/stealth-tor-phone-server/phone-server"
+elif [ ! -f "$SOURCE_CLI" ] && [ -f "/sdcard/Download/phone-server" ]; then
+    SOURCE_CLI="/sdcard/Download/phone-server"
+elif [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/phone-server" ]; then
+    SOURCE_CLI="$HOME/phone-server"
+fi
+
+if [ -f "$SOURCE_CLI" ]; then
+    cp "$SOURCE_CLI" "$PREFIX/bin/phone-server"
     chmod 755 "$PREFIX/bin/phone-server"
     ln -sf "$PREFIX/bin/phone-server" "$PREFIX/bin/stealth-server"
 fi

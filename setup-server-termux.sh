@@ -153,6 +153,7 @@ killall -9 tor sshd sshd-session 2>/dev/null || true
 pkill -9 -x tor 2>/dev/null || true
 pkill -9 -x sshd 2>/dev/null || true
 pkill -9 sshd-session 2>/dev/null || true
+termux-wake-unlock 2>/dev/null || true
 echo "[+] Phone server stopped & all active sessions terminated."
 EOF
 
@@ -168,11 +169,8 @@ if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; th
     SSHD_PIDS=$(su -c "pgrep sshd-session" 2>/dev/null || true)
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
-        for p in $SSHD_PIDS; do
-            if su -c "ps -eo ppid,tty" 2>/dev/null | grep -E "^ *$p +pts/" >/dev/null 2>&1; then
-                SHELL_COUNT=$(( SHELL_COUNT + 1 ))
-            fi
-        done
+        REGEX=$(echo $SSHD_PIDS | tr '\n ' '||' | sed 's/||*$//')
+        SHELL_COUNT=$(su -c "ps -eo ppid,tty" 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || echo 0)
     fi
 else
     SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
@@ -180,11 +178,8 @@ else
     SSHD_PIDS=$(pgrep sshd-session 2>/dev/null || true)
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
-        for p in $SSHD_PIDS; do
-            if ps -eo ppid,tty 2>/dev/null | grep -E "^ *$p +pts/" >/dev/null 2>&1; then
-                SHELL_COUNT=$(( SHELL_COUNT + 1 ))
-            fi
-        done
+        REGEX=$(echo $SSHD_PIDS | tr '\n ' '||' | sed 's/||*$//')
+        SHELL_COUNT=$(ps -eo ppid,tty 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || echo 0)
     fi
 fi
 
@@ -214,13 +209,21 @@ echo "=========================================="
 echo "        Phone Server Status"
 echo "=========================================="
 if [ -n "$SSH_PID" ]; then
-    echo "  [+] OpenSSH Daemon : RUNNING (PID: $SSH_PID)"
+    if [[ "$SSH_PID" =~ ^[0-9]+$ ]]; then
+        echo "  [+] OpenSSH Daemon : RUNNING (PID: $SSH_PID)"
+    else
+        echo "  [+] OpenSSH Daemon : RUNNING ($SSH_PID)"
+    fi
 else
     echo "  [-] OpenSSH Daemon : STOPPED"
 fi
 
 if [ -n "$TOR_PID" ]; then
-    echo "  [+] Tor Daemon     : RUNNING (PID: $TOR_PID)"
+    if [[ "$TOR_PID" =~ ^[0-9]+$ ]]; then
+        echo "  [+] Tor Daemon     : RUNNING (PID: $TOR_PID)"
+    else
+        echo "  [+] Tor Daemon     : RUNNING ($TOR_PID)"
+    fi
 else
     echo "  [-] Tor Daemon     : STOPPED"
 fi
@@ -277,8 +280,8 @@ if [ -z "$SSH_PUB" ]; then
     read -p "Paste Client SSH Public Key (ssh-ed25519 AAAA...): " SSH_PUB
 fi
 
-CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://' | tr -d ' \t\n\r')
-CLEAN_SSH=$(echo "$SSH_PUB" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://' | tr -d ' \t\n\r"'"'")
+CLEAN_SSH=$(echo "$SSH_PUB" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')
 
 KEYS_ADDED=0
 
@@ -319,8 +322,17 @@ chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/stat
 
 # 6f. Install master phone-server CLI tool
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/phone-server" ]; then
-    cp "$SCRIPT_DIR/phone-server" "$PREFIX/bin/phone-server"
+SOURCE_CLI="$SCRIPT_DIR/phone-server"
+if [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/stealth-tor-phone-server/phone-server" ]; then
+    SOURCE_CLI="$HOME/stealth-tor-phone-server/phone-server"
+elif [ ! -f "$SOURCE_CLI" ] && [ -f "/sdcard/Download/phone-server" ]; then
+    SOURCE_CLI="/sdcard/Download/phone-server"
+elif [ ! -f "$SOURCE_CLI" ] && [ -f "$HOME/phone-server" ]; then
+    SOURCE_CLI="$HOME/phone-server"
+fi
+
+if [ -f "$SOURCE_CLI" ]; then
+    cp "$SOURCE_CLI" "$PREFIX/bin/phone-server"
     chmod 755 "$PREFIX/bin/phone-server"
     ln -sf "$PREFIX/bin/phone-server" "$PREFIX/bin/stealth-server"
 fi
@@ -329,6 +341,9 @@ fi
 mkdir -p "$HOME/.termux/boot"
 cat << 'EOF' > "$HOME/.termux/boot/start-phone-server.sh"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+export PREFIX
+export PATH="$PREFIX/bin:$PATH"
 termux-wake-lock 2>/dev/null || true
 $PREFIX/bin/start-server
 EOF
