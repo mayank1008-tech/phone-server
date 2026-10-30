@@ -151,19 +151,42 @@ Host phone-server
 EOF
 chmod 600 "$HOME/.ssh/config"
 
-# 8. Create quick connect alias
-cat << 'EOF' > "$PREFIX/bin/connect-server"
+# 8. Install Client Helper Commands into $PREFIX/bin/
+echo -e "${BLUE}[*] Installing client helper tools (status-server, stop-server, phone-ssh)...${NC}"
+
+cat << 'EOF' > "$PREFIX/bin/phone-ssh"
 #!/data/data/com.termux/files/usr/bin/bash
-# Ensure client tor is running
 pgrep -x tor >/dev/null || nohup tor >/dev/null 2>&1 &
-ssh phone-server
+ssh phone-server "$@"
 EOF
-chmod 755 "$PREFIX/bin/connect-server"
+
+cat << 'EOF' > "$PREFIX/bin/status-server"
+#!/data/data/com.termux/files/usr/bin/bash
+pgrep -x tor >/dev/null || nohup tor >/dev/null 2>&1 &
+echo "[*] Connecting to phone server over Tor..."
+ssh -o ConnectTimeout=15 phone-server status-server
+EOF
+
+cat << 'EOF' > "$PREFIX/bin/stop-server"
+#!/data/data/com.termux/files/usr/bin/bash
+pgrep -x tor >/dev/null || nohup tor >/dev/null 2>&1 &
+ssh -o ConnectTimeout=15 phone-server stop-server
+EOF
+
+# For convenience, link connect-server as well
+ln -sf "$PREFIX/bin/phone-ssh" "$PREFIX/bin/connect-server"
+
+chmod 755 "$PREFIX/bin/phone-ssh" "$PREFIX/bin/status-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/connect-server"
 
 echo ""
 echo -e "${GREEN}${BOLD}=================================================================="
 echo "               MOBILE CLIENT CONFIGURATION COMPLETE!              "
 echo "==================================================================${NC}"
 echo -e "Connect to your home phone server anytime by running:"
-echo -e "${YELLOW}${BOLD}  connect-server${NC}"
+echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}  or  ${YELLOW}${BOLD}phone-ssh${NC}"
+echo ""
+echo "Companion commands available:"
+echo "  • status-server : Inspect phone server status over Tor"
+echo "  • stop-server   : Terminate phone server daemons remotely"
+echo "  • phone-ssh     : One-word shortcut to ssh into the server"
 echo "=================================================================="
