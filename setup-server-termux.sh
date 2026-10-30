@@ -106,8 +106,6 @@ HiddenServicePort 8022 127.0.0.1:8022
 
 # Mobile Dynamic IP & NAT Keepalive Tuning (Pillars 1 & 2)
 KeepalivePeriod 30
-CircuitBuildTimeout 15
-LearnCircuitBuildTimeout 0
 ConnectionPadding 1
 ReducedConnectionPadding 0
 EOF
@@ -129,8 +127,11 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 # Ensure host keys exist
 ssh-keygen -A >/dev/null 2>&1 || true
 
+# Clear any stale Tor descriptor backoff/rate-limit state from previous crashes
+rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
+
 # Start sshd if not already listening
-if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1; then
     echo "[*] OpenSSH daemon is already running (port 8022)."
 else
     $PREFIX/bin/sshd
@@ -138,7 +139,7 @@ else
 fi
 
 # Start Tor if not already listening
-if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1 || pidof tor >/dev/null 2>&1; then
     echo "[*] Tor daemon is already running (port 9050)."
 else
     nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
@@ -186,8 +187,10 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 # Check process IDs
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
-    SSH_PID=$(su -c "pgrep -x sshd" 2>/dev/null | head -n 1)
-    TOR_PID=$(su -c "pgrep -x tor" 2>/dev/null | head -n 1)
+    SSH_PID=$(su -c "pidof sshd" 2>/dev/null | awk '{print $1}')
+    [ -z "$SSH_PID" ] && SSH_PID=$(su -c "pgrep -x sshd" 2>/dev/null | head -n 1)
+    TOR_PID=$(su -c "pidof tor" 2>/dev/null | awk '{print $1}')
+    [ -z "$TOR_PID" ] && TOR_PID=$(su -c "pgrep -x tor" 2>/dev/null | head -n 1)
     SSHD_PIDS=$(su -c "pgrep sshd-session" 2>/dev/null || true)
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
@@ -195,8 +198,10 @@ if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; th
         SHELL_COUNT=$(su -c "ps -eo ppid,tty" 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || true)
     fi
 else
-    SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
-    TOR_PID=$(pgrep -x tor 2>/dev/null | head -n 1)
+    SSH_PID=$(pidof sshd 2>/dev/null | awk '{print $1}')
+    [ -z "$SSH_PID" ] && SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
+    TOR_PID=$(pidof tor 2>/dev/null | awk '{print $1}')
+    [ -z "$TOR_PID" ] && TOR_PID=$(pgrep -x tor 2>/dev/null | head -n 1)
     SSHD_PIDS=$(pgrep sshd-session 2>/dev/null || true)
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
@@ -282,10 +287,12 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
     pkill -x tor 2>/dev/null || true
     pkill -x sshd 2>/dev/null || true
+    rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
     sleep 1
     $PREFIX/bin/start-server
 else
     $PREFIX/bin/stop-server
+    rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
     sleep 1
     $PREFIX/bin/start-server
 fi
@@ -385,12 +392,13 @@ while true; do
     sleep 8
 
     # 1. Process supervision: ensure sshd is listening
-    if ! pgrep -x sshd >/dev/null 2>&1; then
+    if ! pidof sshd >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
         $PREFIX/bin/sshd >/dev/null 2>&1 || true
     fi
 
-    # 2. Process supervision: ensure tor is running
-    if ! pgrep -x tor >/dev/null 2>&1; then
+    # 2. Process supervision: ensure tor is running (dual-check: pidof + socket check)
+    if ! pidof tor >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+        rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
         nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
         LAST_IPS=$(get_current_ips)
         termux-wake-lock 2>/dev/null || true
