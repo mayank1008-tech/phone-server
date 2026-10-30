@@ -103,6 +103,12 @@ EOF
 # 6. Install Server Control Executables into $PREFIX/bin/
 echo -e "${BLUE}[*] Step 5/5: Installing Management CLI Tools into $PREFIX/bin/...${NC}"
 
+# Clean up any legacy shell functions or aliases in ~/.bashrc that would shadow $PREFIX/bin binaries
+if [ -f "$HOME/.bashrc" ]; then
+    sed -i '/# --- Headless Phone Server Management ---/,/Display active PIDs/d' "$HOME/.bashrc" 2>/dev/null || true
+    sed -i '/alias start-server=/d; /alias stop-server=/d; /alias status-server=/d; /alias restart-server=/d' "$HOME/.bashrc" 2>/dev/null || true
+fi
+
 # 6a. start-server (idempotent, checks ports before binding)
 cat << 'EOF' > "$PREFIX/bin/start-server"
 #!/data/data/com.termux/files/usr/bin/bash
