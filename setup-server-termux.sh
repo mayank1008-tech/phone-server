@@ -151,11 +151,20 @@ PREFIX=/data/data/com.termux/files/usr
 if command -v su >/dev/null 2>&1; then
     SSH_PID=$(su -c 'pgrep -x sshd' 2>/dev/null | head -n 1)
     TOR_PID=$(su -c 'pgrep -x tor' 2>/dev/null | head -n 1)
-    SESSIONS=$(su -c 'pgrep sshd-session' 2>/dev/null | wc -l)
+    # Check established TCP connections to OpenSSH port 8022
+    CONN_COUNT=$(su -c 'ss -tn state established sport = :8022 2>/dev/null' | grep -v Recv-Q | grep -c 8022 || echo 0)
+    if [ "$CONN_COUNT" -gt 0 ] 2>/dev/null; then
+        SESSIONS=$CONN_COUNT
+    else
+        # OpenSSH 9.8+ spawns 2 sshd-session processes per client (monitor + session handler)
+        RAW_WORKERS=$(su -c 'pgrep sshd-session' 2>/dev/null | wc -l)
+        SESSIONS=$(( RAW_WORKERS / 2 ))
+    fi
 else
     SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
     TOR_PID=$(pgrep -x tor 2>/dev/null | head -n 1)
-    SESSIONS=$(pgrep sshd-session 2>/dev/null | wc -l)
+    RAW_WORKERS=$(pgrep sshd-session 2>/dev/null | wc -l)
+    SESSIONS=$(( RAW_WORKERS / 2 ))
 fi
 
 # Fallback to direct TCP socket probes (bypasses SELinux process hiding)
@@ -195,7 +204,7 @@ else
     echo "  [-] Tor Daemon     : STOPPED"
 fi
 
-echo "  [*] Active Sessions: $SESSIONS"
+echo "  [*] Active Clients : $SESSIONS connected"
 echo "  [*] Auth Clients   : $AUTH_CLIENTS registered"
 
 if [ -n "$BATTERY" ]; then

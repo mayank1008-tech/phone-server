@@ -251,7 +251,7 @@ $ status-server
 ==========================================
   [+] OpenSSH Daemon : RUNNING (PID: 4291)
   [+] Tor Daemon     : RUNNING (PID: 4292)
-  [*] Active Sessions: 1
+  [*] Active Clients : 1 connected
   [*] Auth Clients   : 2 registered
   [*] Battery Level  : 84%
   [*] Onion Address  : <your-56-char-onion-address>.onion
