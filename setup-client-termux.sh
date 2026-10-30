@@ -28,7 +28,7 @@ if [ -z "$PREFIX" ] || [ ! -d "/data/data/com.termux" ]; then
 fi
 
 export HOME=/data/data/com.termux/files/home
-export PREFIX=/data/data/com.termux/files/usr
+export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 export PATH=$PREFIX/bin:$PATH
 cd "$HOME"
 
@@ -76,8 +76,8 @@ else
 fi
 
 # Extract raw 32-byte public key and private key in unpadded Base32
-TOR_PUB_KEY=$(openssl pkey -in "$X25519_PEM" -pubout -outform DER | tail -c 32 | base32 | tr -d '=')
-TOR_PRIV_KEY=$(openssl pkey -in "$X25519_PEM" -outform DER | tail -c 32 | base32 | tr -d '=')
+TOR_PUB_KEY=$(openssl pkey -in "$X25519_PEM" -pubout -outform DER | tail -c 32 | base32 | tr -d '=\n\r ')
+TOR_PRIV_KEY=$(openssl pkey -in "$X25519_PEM" -outform DER | tail -c 32 | base32 | tr -d '=\n\r ')
 
 # 4. Display Keys for Registration on Server
 echo ""
@@ -110,17 +110,21 @@ if ! grep -q "ClientOnionAuthDir" "$PREFIX/etc/tor/torrc" 2>/dev/null; then
     echo "ClientOnionAuthDir $PREFIX/var/lib/tor/onion_auth" >> "$PREFIX/etc/tor/torrc"
 fi
 
-# 6. Prompt for Server Onion Address and Server Username
+# 6. Prompt for Server Onion Address and Server Username (supports arguments $1 and $2)
 INPUT_ONION="${1:-}"
+SERVER_USER="${2:-}"
+
 if [ -z "$INPUT_ONION" ]; then
     echo -e "${YELLOW}Please enter the 56-character .onion address of your main Server:${NC}"
     read -p "Server Onion Address (e.g. abcdef...onion): " INPUT_ONION
 fi
 
-read -p "Server Termux Username (run 'whoami' on phone server) [default: u0_a300]: " SERVER_USER
-SERVER_USER=${SERVER_USER:-u0_a300}
+if [ -z "$SERVER_USER" ]; then
+    read -p "Server Termux Username (run 'whoami' on phone server) [default: u0_a300]: " SERVER_USER
+    SERVER_USER=${SERVER_USER:-u0_a300}
+fi
 
-CLEAN_ONION=$(echo "$INPUT_ONION" | sed 's/\.onion//' | tr -d ' ')
+CLEAN_ONION=$(echo "$INPUT_ONION" | sed 's/\.onion//' | tr -d ' \n\r')
 
 if [ -n "$CLEAN_ONION" ]; then
     AUTH_FILE_CONTENT="${CLEAN_ONION}:descriptor:x25519:${TOR_PRIV_KEY}"
@@ -136,8 +140,8 @@ else
     echo -e "${YELLOW}[!] Skipped onion address mapping.${NC}"
 fi
 
-# 7. Configure ~/.ssh/config (Clean & Idempotent with boundary markers)
-echo -e "${BLUE}[*] Step 5/5: Configuring ~/.ssh/config...${NC}"
+# 7. Configure ~/.ssh/config (Clean, Idempotent, with Connection Multiplexing)
+echo -e "${BLUE}[*] Step 5/5: Configuring ~/.ssh/config for multiplexed connection...${NC}"
 FULL_ONION="${CLEAN_ONION:-YOUR_ONION_ADDRESS}.onion"
 
 touch "$HOME/.ssh/config"
@@ -158,6 +162,9 @@ Host phone-server
     Compression yes
     ServerAliveInterval 15
     ServerAliveCountMax 3
+    ControlMaster auto
+    ControlPath ~/.ssh/control-%C
+    ControlPersist 10m
     ProxyCommand nc -X 5 -x 127.0.0.1:9050 %h %p
 # --- END STEALTH TOR PHONE SERVER CONFIG ---
 EOF
@@ -165,18 +172,25 @@ EOF
 # 8. Install Client Helper Commands into $PREFIX/bin/
 echo -e "${BLUE}[*] Installing client helper tools (phone-ssh, status-server, stop-server, restart-server)...${NC}"
 
-# 8a. phone-ssh (auto-starts Tor if inactive and waits for port 9050)
+# 8a. phone-ssh (auto-starts Tor if inactive, waits for port 9050 with diagnostic reporting)
 cat << 'EOF' > "$PREFIX/bin/phone-ssh"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[*] Starting local Tor proxy..."
-    nohup tor >/dev/null 2>&1 &
+    nohup tor > "$PREFIX/var/lib/tor/client_tor.log" 2>&1 &
+    TOR_READY=0
     for i in $(seq 1 15); do
         if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+            TOR_READY=1
             break
         fi
         sleep 1
     done
+    if [ "$TOR_READY" -eq 0 ]; then
+        echo "[!] Warning: Local Tor proxy did not respond on 127.0.0.1:9050."
+        echo "    Check logs: cat $PREFIX/var/lib/tor/client_tor.log"
+    fi
 fi
 ssh phone-server "$@"
 EOF
@@ -184,9 +198,10 @@ EOF
 # 8b. status-server
 cat << 'EOF' > "$PREFIX/bin/status-server"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[*] Starting local Tor proxy..."
-    nohup tor >/dev/null 2>&1 &
+    nohup tor > "$PREFIX/var/lib/tor/client_tor.log" 2>&1 &
     for i in $(seq 1 15); do
         if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
             break
@@ -195,15 +210,23 @@ if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     done
 fi
 echo "[*] Connecting to Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server status-server
+if ! ssh -o ConnectTimeout=20 phone-server status-server; then
+    echo ""
+    echo "[!] Could not reach Phone Server over Tor."
+    echo "    Troubleshooting tips:"
+    echo "    1. Ensure phone server is powered on and connected to charger."
+    echo "    2. Ensure phone server has an active Wi-Fi or mobile data connection."
+    echo "    3. Ensure Termux wakelock is acquired on the server."
+fi
 EOF
 
 # 8c. stop-server
 cat << 'EOF' > "$PREFIX/bin/stop-server"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[*] Starting local Tor proxy..."
-    nohup tor >/dev/null 2>&1 &
+    nohup tor > "$PREFIX/var/lib/tor/client_tor.log" 2>&1 &
     for i in $(seq 1 15); do
         if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
             break
@@ -212,15 +235,17 @@ if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     done
 fi
 echo "[*] Sending stop signal to Phone Server over Tor..."
-ssh -o ConnectTimeout=20 phone-server stop-server
+ssh -o ConnectTimeout=20 phone-server stop-server 2>/dev/null || true
+echo "[+] Phone server daemons terminated successfully."
 EOF
 
 # 8d. restart-server
 cat << 'EOF' > "$PREFIX/bin/restart-server"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
     echo "[*] Starting local Tor proxy..."
-    nohup tor >/dev/null 2>&1 &
+    nohup tor > "$PREFIX/var/lib/tor/client_tor.log" 2>&1 &
     for i in $(seq 1 15); do
         if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
             break
@@ -238,7 +263,7 @@ ln -sf "$PREFIX/bin/phone-ssh" "$PREFIX/bin/connect-server"
 chmod 755 "$PREFIX/bin/phone-ssh" "$PREFIX/bin/status-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/connect-server"
 
 # Dynamically apply exact SELinux MLS context if on Android root
-if command -v su >/dev/null 2>&1; then
+if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1 || true)
     if [ -n "$TERMUX_CTX" ]; then
         su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/phone-ssh 2>/dev/null || true"
@@ -253,7 +278,7 @@ echo -e "Connect to your home phone server anytime by running:"
 echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}  or  ${YELLOW}${BOLD}phone-ssh${NC}"
 echo ""
 echo "Companion commands available:"
-echo "  • phone-ssh      : One-word shortcut to ssh into the server"
+echo "  • phone-ssh      : One-word shortcut to ssh into the server (multiplexed)"
 echo "  • status-server  : Query phone server status over Tor"
 echo "  • stop-server    : Force terminate phone server daemons remotely"
 echo "  • restart-server : Cleanly cycle the server daemons remotely"

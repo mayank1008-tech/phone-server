@@ -29,7 +29,7 @@ if [ -z "$PREFIX" ] || [ ! -d "/data/data/com.termux" ]; then
 fi
 
 export HOME=/data/data/com.termux/files/home
-export PREFIX=/data/data/com.termux/files/usr
+export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 export PATH=$PREFIX/bin:$PATH
 cd "$HOME"
 
@@ -48,10 +48,12 @@ for cmd in sshd tor openssl ssh-keygen base32 pgrep killall; do
 done
 echo -e "${GREEN}[+] Dependencies verified: sshd, tor, openssl, ssh-keygen, base32, pgrep, killall.${NC}"
 
-# 3. Android & Samsung Sleep Hardening (via Root if available)
+# 3. Android & Samsung Sleep Hardening (via Root if available & granted)
 echo -e "${BLUE}[*] Step 2/5: Applying Android & Samsung Keep-Alive Hardening...${NC}"
-if command -v su >/dev/null 2>&1; then
-    echo -e "${GREEN}[+] Root access detected. Applying permanent power-management immunity...${NC}"
+HAS_ROOT=0
+if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
+    HAS_ROOT=1
+    echo -e "${GREEN}[+] Root access confirmed. Applying permanent power-management immunity...${NC}"
     su -c "dumpsys deviceidle whitelist +com.termux 2>/dev/null || true"
     su -c "cmd appops set com.termux RUN_IN_BACKGROUND allow 2>/dev/null || true"
     su -c "cmd appops set com.termux RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true"
@@ -62,7 +64,7 @@ if command -v su >/dev/null 2>&1; then
     su -c "pm disable-user --user 0 com.samsung.android.lool 2>/dev/null || true"
     echo -e "${GREEN}[+] Android OS Doze and Samsung background killers suppressed.${NC}"
 else
-    echo -e "${YELLOW}[!] Root (su) not found or not granted. Acquiring user-space wakelock...${NC}"
+    echo -e "${YELLOW}[!] Root (su) not available or not granted. Acquiring user-space wakelock...${NC}"
 fi
 
 # Acquire Termux wakelock
@@ -75,6 +77,9 @@ mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
 touch "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
+
+# Ensure host keys exist (prevents 'no hostkeys available' error on fresh setups)
+ssh-keygen -A >/dev/null 2>&1 || true
 
 # Enforce no password auth and key-only in sshd_config
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PasswordAuthentication no" >> "$PREFIX/etc/ssh/sshd_config"
@@ -94,9 +99,9 @@ if [ -f "$PREFIX/etc/tor/torrc" ]; then
     mv "$PREFIX/etc/tor/torrc.bak" "$PREFIX/etc/tor/torrc"
 fi
 
-cat << 'EOF' >> "$PREFIX/etc/tor/torrc"
+cat << EOF >> "$PREFIX/etc/tor/torrc"
 # Stealth Tor v3 Onion Service for SSH
-HiddenServiceDir /data/data/com.termux/files/usr/var/lib/tor/hidden_ssh/
+HiddenServiceDir $PREFIX/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
 EOF
 
@@ -112,7 +117,10 @@ fi
 # 6a. start-server (idempotent, checks ports before binding)
 cat << 'EOF' > "$PREFIX/bin/start-server"
 #!/data/data/com.termux/files/usr/bin/bash
-PREFIX=/data/data/com.termux/files/usr
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+# Ensure host keys exist
+ssh-keygen -A >/dev/null 2>&1 || true
 
 # Start sshd if not already listening
 if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
@@ -138,7 +146,7 @@ EOF
 # 6b. stop-server (terminates listener and all worker sessions)
 cat << 'EOF' > "$PREFIX/bin/stop-server"
 #!/data/data/com.termux/files/usr/bin/bash
-if command -v su >/dev/null 2>&1; then
+if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     su -c 'killall -9 tor sshd sshd-session 2>/dev/null || true'
 fi
 killall -9 tor sshd sshd-session 2>/dev/null || true
@@ -151,26 +159,24 @@ EOF
 # 6c. status-server (dual-layer detection: root pgrep + local socket probes)
 cat << 'EOF' > "$PREFIX/bin/status-server"
 #!/data/data/com.termux/files/usr/bin/bash
-PREFIX=/data/data/com.termux/files/usr
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 # Check process IDs (dual-layer: root su if available, fallback to user space)
-if command -v su >/dev/null 2>&1; then
+if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     SSH_PID=$(su -c 'pgrep -x sshd' 2>/dev/null | head -n 1)
     TOR_PID=$(su -c 'pgrep -x tor' 2>/dev/null | head -n 1)
-    # Check established TCP connections to OpenSSH port 8022
     CONN_COUNT=$(su -c 'ss -tn state established sport = :8022 2>/dev/null' | grep -v Recv-Q | grep -c 8022 || echo 0)
     if [ "$CONN_COUNT" -gt 0 ] 2>/dev/null; then
         SESSIONS=$CONN_COUNT
     else
-        # OpenSSH 9.8+ spawns 2 sshd-session processes per client (monitor + session handler)
         RAW_WORKERS=$(su -c 'pgrep sshd-session' 2>/dev/null | wc -l)
-        SESSIONS=$(( RAW_WORKERS / 2 ))
+        SESSIONS=$(( ${RAW_WORKERS:-0} / 2 ))
     fi
 else
     SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
     TOR_PID=$(pgrep -x tor 2>/dev/null | head -n 1)
     RAW_WORKERS=$(pgrep sshd-session 2>/dev/null | wc -l)
-    SESSIONS=$(( RAW_WORKERS / 2 ))
+    SESSIONS=$(( ${RAW_WORKERS:-0} / 2 ))
 fi
 
 # Fallback to direct TCP socket probes (bypasses SELinux process hiding)
@@ -187,7 +193,7 @@ if [ -z "$TOR_PID" ]; then
 fi
 
 ONION=$(cat "$PREFIX/var/lib/tor/hidden_ssh/hostname" 2>/dev/null || true)
-AUTH_CLIENTS=$(ls "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients" 2>/dev/null | wc -l || echo 0)
+AUTH_CLIENTS=$(find "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients" -name "*.auth" 2>/dev/null | wc -l || echo 0)
 
 # Optional battery status
 BATTERY=""
@@ -226,7 +232,7 @@ EOF
 # 6d. restart-server
 cat << 'EOF' > "$PREFIX/bin/restart-server"
 #!/data/data/com.termux/files/usr/bin/bash
-PREFIX=/data/data/com.termux/files/usr
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 $PREFIX/bin/stop-server
 sleep 1
 $PREFIX/bin/start-server
@@ -238,7 +244,7 @@ cat << 'EOF' > "$PREFIX/bin/authorize-client"
 # ==============================================================================
 # Authorize a New Client Device (Phone Server)
 # ==============================================================================
-PREFIX=/data/data/com.termux/files/usr
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME=/data/data/com.termux/files/home
 
 CLIENT_NAME="$1"
@@ -250,6 +256,10 @@ if [ -z "$CLIENT_NAME" ]; then
     CLIENT_NAME=${CLIENT_NAME:-client}
 fi
 
+# Sanitize client name for safe filenames (alphanumeric, underscore, dash)
+CLIENT_NAME=$(echo "$CLIENT_NAME" | tr ' ' '_' | tr -cd 'a-zA-Z0-9_-')
+CLIENT_NAME=${CLIENT_NAME:-client}
+
 if [ -z "$TOR_PUB" ]; then
     read -p "Paste Client Tor Public Key (descriptor:x25519:...): " TOR_PUB
 fi
@@ -258,34 +268,57 @@ if [ -z "$SSH_PUB" ]; then
     read -p "Paste Client SSH Public Key (ssh-ed25519 AAAA...): " SSH_PUB
 fi
 
-if [ -n "$TOR_PUB" ]; then
-    CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://' | tr -d ' \n\r')
+CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://' | tr -d ' \t\n\r')
+CLEAN_SSH=$(echo "$SSH_PUB" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+KEYS_ADDED=0
+
+if [ -n "$CLEAN_PUB" ]; then
     mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
     echo "descriptor:x25519:$CLEAN_PUB" > "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
     chmod 600 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
     echo "[+] Tor authorization registered: ${CLIENT_NAME}.auth"
+    KEYS_ADDED=1
 fi
 
-if [ -n "$SSH_PUB" ]; then
+if [ -n "$CLEAN_SSH" ]; then
     mkdir -p "$HOME/.ssh"
-    echo "$SSH_PUB" | tr -d '\r' >> "$HOME/.ssh/authorized_keys"
-    chmod 600 "$HOME/.ssh/authorized_keys"
-    echo "[+] SSH Public Key authorized in ~/.ssh/authorized_keys"
+    if ! grep -qF "$CLEAN_SSH" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+        echo "$CLEAN_SSH" >> "$HOME/.ssh/authorized_keys"
+        chmod 600 "$HOME/.ssh/authorized_keys"
+        echo "[+] SSH Public Key authorized in ~/.ssh/authorized_keys"
+    else
+        echo "[*] SSH Public Key is already present in ~/.ssh/authorized_keys"
+    fi
+    KEYS_ADDED=1
 fi
 
-# Signal Tor to reload authorization descriptors without dropping circuits
-if command -v su >/dev/null 2>&1; then
-    su -c 'killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null' || true
+if [ "$KEYS_ADDED" -eq 1 ]; then
+    # Signal Tor to reload authorization descriptors without dropping circuits
+    if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
+        su -c 'killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null' || true
+    else
+        killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null || true
+    fi
+    echo "[+] Tor reloaded. Client '$CLIENT_NAME' is authorized!"
 else
-    killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null || true
+    echo "[!] No keys provided. Skipped authorization. Run 'authorize-client' anytime when ready."
 fi
-echo "[+] Tor reloaded. Client '$CLIENT_NAME' is authorized!"
 EOF
 
 chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client"
 
+# 6f. Autostart on boot (Termux:Boot support)
+mkdir -p "$HOME/.termux/boot"
+cat << 'EOF' > "$HOME/.termux/boot/start-phone-server.sh"
+#!/data/data/com.termux/files/usr/bin/bash
+termux-wake-lock 2>/dev/null || true
+$PREFIX/bin/start-server
+EOF
+chmod 755 "$HOME/.termux/boot/start-phone-server.sh"
+
 # Dynamically apply exact SELinux MLS context if on Android root
-if command -v su >/dev/null 2>&1; then
+if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1 || true)
     if [ -n "$TERMUX_CTX" ]; then
         su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/authorize-client 2>/dev/null || true"
@@ -296,6 +329,7 @@ fi
 echo ""
 echo -e "${YELLOW}${BOLD}--- CLIENT AUTHORIZATION REGISTRATION ---${NC}"
 echo "To grant your PC or mobile device access to this server, register its generated keys."
+echo "If you haven't generated client keys yet, you can press Enter to skip and run 'authorize-client' later."
 echo ""
 
 "$PREFIX/bin/authorize-client"
