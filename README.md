@@ -4,6 +4,27 @@ Turn any spare or rooted Android phone into a headless, 24/7 Linux server access
 
 Zero third-party accounts. Zero port forwarding. Zero public IPv4 requirements. Zero dependence on corporate relays like Tailscale, Cloudflare, or Ngrok.
 
+> 💡 **New to this?** Read the beginner-friendly [Developer & Architecture Guide](DEVELOPER_GUIDE.md) for an intuitive walkthrough explaining what runs on the client vs. server, the real-world bugs we defeated (dynamic IP churn, Toybox bugs), and why this math-based architecture keeps your phone 100% invisible.
+
+---
+
+## 💡 How It Works in Simple Terms
+
+```text
+[ Client (Laptop / 2nd Phone) ]                         [ Android Phone Server (Termux) ]
+  • Private X25519 Tor Key                                • Public X25519 Client Lock
+  • Private Ed25519 SSH Key                               • Authorized Ed25519 SSH Key
+  • Local Tor SOCKS5 (127.0.0.1:9050)                     • OpenSSH Daemon (sshd:8022)
+  • Routes ONLY *.onion via Tor                           • Dynamic IP Watchdog (watchdog-server)
+          │                                                       │
+          └────────► [ 6-Hop Encrypted Rendezvous Tunnel ] ◄──────┘
+                     (Meets in the middle — NO open ports!)
+```
+
+* **Client Device (Your Laptop or Secondary Phone)**: Runs a local Tor proxy that routes *only* traffic to your phone server. It holds your private keys and connects via SSH in `<0.1s` using connection multiplexing.
+* **Server Device (Android Phone running Termux)**: Runs OpenSSH on port 8022 and Tor with Client Authorization. Passwords are completely disabled. It publishes an encrypted descriptor that only your client can decipher.
+* **100% Non-Root & Carrier-Grade NAT Proof**: Cellular carriers block all incoming connections. Because Tor Onion Services connect *outward* to Rendezvous Points, your server is reachable from anywhere in the world on Wi-Fi, 4G, or 5G without root!
+
 ---
 
 ## Table of Contents
