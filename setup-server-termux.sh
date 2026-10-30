@@ -170,7 +170,7 @@ if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; th
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
         REGEX=$(echo $SSHD_PIDS | tr '\n ' '||' | sed 's/||*$//')
-        SHELL_COUNT=$(su -c "ps -eo ppid,tty" 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || echo 0)
+        SHELL_COUNT=$(su -c "ps -eo ppid,tty" 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || true)
     fi
 else
     SSH_PID=$(pgrep -x sshd 2>/dev/null | head -n 1)
@@ -179,9 +179,11 @@ else
     SHELL_COUNT=0
     if [ -n "$SSHD_PIDS" ]; then
         REGEX=$(echo $SSHD_PIDS | tr '\n ' '||' | sed 's/||*$//')
-        SHELL_COUNT=$(ps -eo ppid,tty 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || echo 0)
+        SHELL_COUNT=$(ps -eo ppid,tty 2>/dev/null | grep -c -E "^ *($REGEX) +pts/" || true)
     fi
 fi
+SHELL_COUNT=$(echo "$SHELL_COUNT" | tr -dc '0-9')
+SHELL_COUNT="${SHELL_COUNT:-0}"
 
 # Fallback to direct TCP socket probes (bypasses SELinux process hiding)
 if [ -z "$SSH_PID" ]; then
@@ -197,7 +199,8 @@ if [ -z "$TOR_PID" ]; then
 fi
 
 ONION=$(cat "$PREFIX/var/lib/tor/hidden_ssh/hostname" 2>/dev/null || true)
-AUTH_CLIENTS=$(find "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients" -name "*.auth" 2>/dev/null | wc -l || echo 0)
+AUTH_CLIENTS=$(find "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients" -name "*.auth" 2>/dev/null | wc -l | tr -dc '0-9')
+AUTH_CLIENTS="${AUTH_CLIENTS:-0}"
 
 # Optional battery status
 BATTERY=""
