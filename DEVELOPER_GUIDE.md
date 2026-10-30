@@ -10,6 +10,8 @@ Whether you want to contribute, fork, audit the security architecture, or simply
 
 1. [High-Level Philosophy & The Threat Model](#1-high-level-philosophy--the-threat-model)
 2. [Networking Foundations: Conquering Carrier-Grade NAT](#2-networking-foundations-conquering-carrier-grade-nat)
+   - [How Tor Bypasses CGNAT](#how-tor-bypasses-cgnat)
+   - [Dynamic IP Churn & Self-Healing Watchdog](#dynamic-ip-churn--self-healing-watchdog)
 3. [The Tor v3 Onion Protocol & Client Authorization](#3-the-tor-v3-onion-protocol--client-authorization)
    - [Onion Routing & 6-Hop Encrypted Circuits](#onion-routing--6-hop-encrypted-circuits)
    - [Mathematical Derivation of `.onion` Addresses](#mathematical-derivation-of-onion-addresses)
@@ -77,6 +79,22 @@ Tor Onion Services completely eliminate the concept of inbound listening ports:
 2. Because the connection is outbound from the phone to the Tor network, the carrier NAT gateway happily allows the TCP connection and keeps the NAT table state alive.
 3. When a client wants to connect, it meets the phone at a third-party relay called a **Rendezvous Point**.
 4. Both devices connect **outward** to the rendezvous point. No inbound ports are ever opened on either device!
+
+### Dynamic IP Churn & Self-Healing Watchdog
+
+Mobile phones frequently change IP addresses as they roam between Wi-Fi and 4G/5G, switch cell towers, or renew DHCP leases.
+
+#### The Mobile Dead-Socket Problem
+1. When the phone server's IP address changes, the remote Introduction Points have no immediate way of knowing the phone has moved. They continue sending traffic to the old IP, where packets are silently dropped (black-holed).
+2. Because the server does not receive an active TCP `RST`, Tor's established TLS circuits to Introduction Points remain stalled in a dead socket state.
+3. Left unmanaged, Tor can take several minutes to time out dead circuits (`connection_failed=89`), causing incoming clients to receive `Host unreachable`.
+
+#### The 100% Non-Root Solution: Watchdog & SIGHUP
+To solve this permanently without requiring root privileges:
+1. **The Watchdog Daemon (`watchdog-server`)**: A lightweight background supervisor runs inside Termux, sampling active network interfaces (`ifconfig`) every 8 seconds.
+2. **Instant `SIGHUP` Signal**: The moment `CURRENT_IPS != LAST_IPS`, the watchdog issues a `killall -HUP tor` signal.
+3. **Descriptor Invalidation**: `SIGHUP` forces Tor's user-space event loop to immediately close stale socket file descriptors, construct new 3-hop circuits over the active interface, select fresh Introduction Points, and upload an updated descriptor to the HSDir ring within **10 to 15 seconds**.
+4. **Process Supervision**: If Android OOM terminates `sshd` or `tor`, the watchdog automatically revives them and re-acquires the Termux wakelock.
 
 ---
 

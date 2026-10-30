@@ -31,6 +31,7 @@ Zero third-party accounts. Zero port forwarding. Zero public IPv4 requirements. 
   - [Android SELinux MLS Dynamic Contexts](#android-selinux-mls-dynamic-contexts)
   - [Android OS Power Management & Samsung One UI Sleep Suppression](#android-os-power-management--samsung-one-ui-sleep-suppression)
   - [SSH Connection Multiplexing (ControlMaster)](#ssh-connection-multiplexing-controlmaster)
+  - [Dynamic IP Auto-Healing Watchdog (Wi-Fi & Cellular Roaming)](#dynamic-ip-auto-healing-watchdog-wi-fi--cellular-roaming)
 - [Developer Guide](#developer-guide)
 - [Manual Administration Cheat Sheet](#manual-administration-cheat-sheet)
 - [Troubleshooting](#troubleshooting)
@@ -466,6 +467,20 @@ Host phone-server
 * **`ControlMaster auto` & `ControlPath`**: The first connection establishes the Tor circuit and authenticates. Subsequent terminals, file transfers (`rsync` / `scp`), or `status-server` commands reuse the active master socket.
 * **Result**: Subsequent commands execute **instantaneously (< 0.1 seconds)** with zero handshake latency.
 * **`ControlPersist 10m`**: Keeps the underlying encrypted socket warm for 10 minutes after you close your last terminal window.
+
+---
+
+### Dynamic IP Auto-Healing Watchdog (Wi-Fi & Cellular Roaming)
+
+Mobile phones frequently change IP addresses as they roam between Wi-Fi and cellular networks, switch cell towers, or renew DHCP leases.
+
+Standard Tor hidden services stall when an IP changes because existing TCP connections to remote Introduction Points become black-holed.
+
+To solve this 100% in user space without requiring root privileges:
+* **`watchdog-server`**: Runs as a lightweight background supervisor in Termux, sampling active network interfaces (`ifconfig`) every 8 seconds.
+* **Instant `SIGHUP` Recovery**: The moment an IP change is detected, it sends `killall -HUP tor`. Tor immediately closes stale sockets, tears down broken circuits, negotiates new Introduction Points, and republishes its hidden service descriptor within **10 to 15 seconds**.
+* **Tor Mobile Tuning**: Configures `KeepalivePeriod 30` and `CircuitBuildTimeout 15` in `torrc` to prevent carrier NAT firewalls from dropping idle circuits.
+* **Process Supervision**: If Android OOM terminates `sshd` or `tor`, the watchdog automatically revives them and re-acquires the Termux wakelock.
 
 ---
 

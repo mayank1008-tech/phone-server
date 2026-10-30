@@ -103,8 +103,13 @@ cat << EOF >> "$PREFIX/etc/tor/torrc"
 # Stealth Tor v3 Onion Service for SSH
 HiddenServiceDir $PREFIX/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
-KeepalivePeriod 60
-CircuitBuildTimeout 30
+
+# Mobile Dynamic IP & NAT Keepalive Tuning (Pillars 1 & 2)
+KeepalivePeriod 30
+CircuitBuildTimeout 15
+LearnCircuitBuildTimeout 0
+ConnectionPadding 1
+ReducedConnectionPadding 0
 EOF
 
 # 6. Install Server Control Executables into $PREFIX/bin/
@@ -142,14 +147,29 @@ fi
 
 # Ensure Termux wakelock is active
 termux-wake-lock 2>/dev/null || true
+
+# Start background dynamic IP watchdog & auto-healer
+if [ -x "$PREFIX/bin/watchdog-server" ]; then
+    if ! pgrep -f "watchdog-server" >/dev/null 2>&1; then
+        nohup $PREFIX/bin/watchdog-server >/dev/null 2>&1 &
+        echo "[+] Dynamic IP watchdog started in background."
+    fi
+fi
 echo "[+] Phone server is active and protected against Doze."
 EOF
 
-# 6b. stop-server (terminates listener and all worker sessions)
+# 6b. stop-server (terminates listener, watchdog, and all worker sessions)
 cat << 'EOF' > "$PREFIX/bin/stop-server"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+# Stop watchdog first so it does not auto-restart killed services
+pkill -9 -f "watchdog-server" 2>/dev/null || true
+rm -f "$PREFIX/var/run/watchdog-server.pid" 2>/dev/null || true
+
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     su -c 'killall -9 tor sshd sshd-session 2>/dev/null || true'
+    su -c 'pkill -9 -f watchdog-server 2>/dev/null || true'
 fi
 killall -9 tor sshd sshd-session 2>/dev/null || true
 pkill -9 -x tor 2>/dev/null || true
@@ -231,6 +251,13 @@ if [ -n "$TOR_PID" ]; then
     fi
 else
     echo "  [-] Tor Daemon     : STOPPED"
+fi
+
+if pgrep -f "watchdog-server" >/dev/null 2>&1; then
+    WATCHDOG_PID=$(pgrep -f "watchdog-server" | head -n 1)
+    echo "  [+] Watchdog       : RUNNING (PID: $WATCHDOG_PID, Auto-heals IP)"
+else
+    echo "  [-] Watchdog       : STOPPED"
 fi
 
 echo "  [*] Active Shells  : $SHELL_COUNT open"
@@ -332,7 +359,57 @@ else
 fi
 EOF
 
-chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client"
+# 6e. watchdog-server (Background dynamic IP monitor & auto-healer)
+cat << 'EOF' > "$PREFIX/bin/watchdog-server"
+#!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+WATCHDOG_PID_FILE="$PREFIX/var/run/watchdog-server.pid"
+mkdir -p "$PREFIX/var/run" "$PREFIX/var/lib/tor" 2>/dev/null || true
+
+if [ -f "$WATCHDOG_PID_FILE" ]; then
+    OLD_PID=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        exit 0
+    fi
+fi
+echo $$ > "$WATCHDOG_PID_FILE"
+
+get_current_ips() {
+    ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | sort | tr '\n' ' '
+}
+
+LAST_IPS=$(get_current_ips)
+
+while true; do
+    sleep 8
+
+    # 1. Process supervision: ensure sshd is listening
+    if ! pgrep -x sshd >/dev/null 2>&1; then
+        $PREFIX/bin/sshd >/dev/null 2>&1 || true
+    fi
+
+    # 2. Process supervision: ensure tor is running
+    if ! pgrep -x tor >/dev/null 2>&1; then
+        nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+        LAST_IPS=$(get_current_ips)
+        termux-wake-lock 2>/dev/null || true
+        continue
+    fi
+
+    # 3. Dynamic IP / Network Interface Change Detection (Wi-Fi <-> Cellular / DHCP renew)
+    CURRENT_IPS=$(get_current_ips)
+    if [ -n "$CURRENT_IPS" ] && [ "$CURRENT_IPS" != "$LAST_IPS" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Network change detected ($LAST_IPS -> $CURRENT_IPS). Signaling Tor SIGHUP..." >> "$PREFIX/var/lib/tor/watchdog.log" 2>&1
+        LAST_IPS="$CURRENT_IPS"
+        # SIGHUP forces Tor to immediately tear down dead circuits and rebuild on new interface
+        pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
+        termux-wake-lock 2>/dev/null || true
+    fi
+done
+EOF
+
+chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client" "$PREFIX/bin/watchdog-server"
 
 # 6f. Install master phone-server CLI tool
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -420,5 +497,6 @@ echo "  • start-server     : Start background services (OpenSSH & Tor)"
 echo "  • stop-server      : Force terminate all listeners and active sessions"
 echo "  • status-server    : Display active PIDs, sockets, clients, and onion address"
 echo "  • restart-server   : Cleanly cycle the server"
+echo "  • watchdog-server  : Dynamic IP auto-healer & process supervisor"
 echo "  • authorize-client : Register additional client devices anytime"
 echo "=================================================================="
