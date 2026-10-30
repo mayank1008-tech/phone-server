@@ -1,0 +1,22 @@
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cryptographic Keys & Tokens
+*.pem
+*.key
+*.pub
+*.auth
+*.auth_private
+phone_server_*
+id_*
+
+# Logs and Runtime State
+*.log
+*.bak
+tor_data/
+hidden_ssh/
+onion_auth/
