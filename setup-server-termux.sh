@@ -103,6 +103,8 @@ cat << EOF >> "$PREFIX/etc/tor/torrc"
 # Stealth Tor v3 Onion Service for SSH
 HiddenServiceDir $PREFIX/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
+KeepalivePeriod 60
+CircuitBuildTimeout 30
 EOF
 
 # 6. Install Server Control Executables into $PREFIX/bin/
@@ -248,9 +250,18 @@ EOF
 cat << 'EOF' > "$PREFIX/bin/restart-server"
 #!/data/data/com.termux/files/usr/bin/bash
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-$PREFIX/bin/stop-server
-sleep 1
-$PREFIX/bin/start-server
+# Cycle Tor and SSH daemon cleanly
+# When called over an active SSH session, avoid terminating own session before start-server
+if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
+    pkill -x tor 2>/dev/null || true
+    pkill -x sshd 2>/dev/null || true
+    sleep 1
+    $PREFIX/bin/start-server
+else
+    $PREFIX/bin/stop-server
+    sleep 1
+    $PREFIX/bin/start-server
+fi
 EOF
 
 # 6e. authorize-client (Allows registering additional client devices anytime)
