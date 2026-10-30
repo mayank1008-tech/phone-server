@@ -35,7 +35,7 @@ cd $HOME
 # 1. Package Installation
 echo -e "${BLUE}[*] Step 1/5: Installing dependencies (tor, openssh, netcat-openbsd)...${NC}"
 pkg update -y
-pkg install -y tor openssh netcat-openbsd openssl
+pkg install -y tor openssh netcat-openbsd openssl coreutils
 
 # 2. SSH Key Generation (Ed25519)
 echo -e "${BLUE}[*] Step 2/5: Generating Client SSH Ed25519 Keypair...${NC}"
@@ -58,13 +58,14 @@ chmod 700 "$HOME/.tor_keys"
 X25519_PEM="$HOME/.tor_keys/x25519_priv.pem"
 
 if [ ! -f "$X25519_PEM" ]; then
-    openssl genpkey -algorithm x25519 -out "$X25519_PEM" 2>/dev/null
+    openssl genpkey -algorithm x25519 -out "$X25519_PEM"
     chmod 600 "$X25519_PEM"
     echo -e "${GREEN}[+] Generated new X25519 key: $X25519_PEM${NC}"
 else
     echo -e "${YELLOW}[!] Existing X25519 key detected at: $X25519_PEM (Reusing)${NC}"
 fi
 
+# Extract raw 32-byte public key and private key in unpadded Base32
 TOR_PUB_KEY=$(openssl pkey -in "$X25519_PEM" -pubout -outform DER | tail -c 32 | base32 | tr -d '=')
 TOR_PRIV_KEY=$(openssl pkey -in "$X25519_PEM" -outform DER | tail -c 32 | base32 | tr -d '=')
 
