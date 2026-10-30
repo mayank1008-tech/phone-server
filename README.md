@@ -2,18 +2,61 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android%20Termux-green.svg)](https://termux.dev)
-[![Client: Linux & Android](https://img.shields.io/badge/Client-Linux%20%7C%20Android-orange.svg)]()
+[![Clients: Linux & Android](https://img.shields.io/badge/Clients-Linux%20%7C%20Android-orange.svg)]()
 [![Security: Zero Accounts](https://img.shields.io/badge/Security-Zero%20Accounts%20%7C%20Pure%20Crypto-red.svg)]()
+[![Encryption: x25519 + Ed25519](https://img.shields.io/badge/Encryption-x25519%20%2B%20Ed25519-purple.svg)]()
 
-Turn any spare or rooted Android phone into a **headless, 24/7 Linux home server** accessible from anywhere globally with **dual-layer cryptographic authorization**, zero open router ports, zero DNS leaks, and **zero accounts or third-party sign-ups** (No Tailscale, No Cloudflare, No Ngrok).
+Convert any spare or rooted Android phone into a **headless, 24/7 Linux home server** accessible from anywhere globally with **dual-layer cryptographic authorization**, zero open router ports, zero DNS leaks, and **zero accounts or third-party sign-ups** (No Tailscale, No Cloudflare, No Ngrok).
 
 ---
 
-## 🔒 Threat Model & Architecture
+## 📑 Table of Contents
 
-Standard Tor hidden services publish their addresses to public directory nodes where port scanners and web crawlers can discover them. 
+- [Security Architecture & Threat Model](#-security-architecture--threat-model)
+  - [Why Not Tailscale, Ngrok, or Cloudflare?](#why-not-tailscale-ngrok-or-cloudflare)
+  - [Tor v3 Stealth Mode vs. Public Hidden Services](#tor-v3-stealth-mode-vs-public-hidden-services)
+  - [The Two Cryptographic Gates](#the-two-cryptographic-gates)
+  - [Isolated Client Routing](#isolated-client-routing)
+- [Prerequisites & Requirements Matrix](#-prerequisites--requirements-matrix)
+- [Repository Structure](#-repository-structure)
+- [Quickstart Guide](#-quickstart-guide)
+  - [Phase 1: Setup Client (Linux PC or Secondary Phone)](#phase-1-setup-client-linux-pc-or-secondary-phone)
+  - [Phase 2: Setup Server (Android Phone)](#phase-2-setup-server-android-phone)
+  - [Phase 3: Connect & Verify](#phase-3-connect--verify)
+  - [Phase 4: Adding Multiple Clients (Work Laptop, Second Phone)](#phase-4-adding-multiple-clients)
+- [Daily Operations & CLI Tools](#-daily-operations--cli-tools)
+- [Deep Dive: Internal Mechanics & Process Architecture](#-deep-dive-internal-mechanics--process-architecture)
+  - [OpenSSH 9.8+ Process Splitting (`sshd` vs. `sshd-session`)](#openssh-98-process-splitting-sshd-vs-sshd-session)
+  - [Tor Circuit Teardown & Linger (`ShutdownWaitLength 30`)](#tor-circuit-teardown--linger-shutdownwaitlength-30)
+  - [Android SELinux Domain Process Isolation](#android-selinux-domain-process-isolation)
+  - [Android SELinux MLS Dynamic Contexts](#android-selinux-mls-dynamic-contexts)
+  - [Android OS Power Management & Samsung One UI Sleep Suppression](#android-os-power-management--samsung-one-ui-sleep-suppression)
+  - [SSH Multiplexing & Connection Warmth](#ssh-multiplexing--connection-warmth)
+- [Manual Administration & Diagnostic Cheat Sheet](#-manual-administration--diagnostic-cheat-sheet)
+- [Battle-Tested Troubleshooting Guide](#-battle-tested-troubleshooting-guide)
+- [Security Best Practices & Revocation](#-security-best-practices--revocation)
+- [License](#-license)
 
-This project implements **Tor v3 Client Authorization (Stealth Mode)** combined with **Ed25519 Public-Key SSH**:
+---
+
+## 🔒 Security Architecture & Threat Model
+
+### Why Not Tailscale, Ngrok, or Cloudflare?
+
+Most modern remote-access solutions rely on third-party SaaS infrastructure:
+* **Tailscale / ZeroTier**: Require logging in with Google, Microsoft, or GitHub SSO. Your device control plane and node metadata reside on corporate servers.
+* **Cloudflare Tunnels**: Require a domain name registered with Cloudflare, account credentials, and Cloudflare holds TLS termination keys.
+* **Ngrok**: Rate-limited, requires credit card verification or accounts, and proxies all unencrypted payloads through shared servers.
+
+**Stealth Tor v3 Phone Server uses zero accounts, zero registrations, zero proprietary relays, and zero email addresses.** Communication is anchored strictly in mathematics and asymmetric cryptography: **Curve25519 (X25519)** and **Ed25519**.
+
+---
+
+### Tor v3 Stealth Mode vs. Public Hidden Services
+
+Standard Tor onion services publish unencrypted descriptors to Tor Distributed Hash Table (HSDir) directory nodes. Malicious directory authorities and port scanners routinely harvest public onion addresses from the DHT and bombard them with automated exploit scripts.
+
+This project enforces **Tor v3 Client Authorization (Stealth Mode)**:
 
 ```
 [ Client (Laptop / Second Phone) ]                         [ Android Phone Server (Termux) ]
@@ -21,36 +64,65 @@ This project implements **Tor v3 Client Authorization (Stealth Mode)** combined 
   • Tor Priv: onion_auth/phone.auth_private                 • Tor Lock: authorized_clients/laptop.auth
         │                                                                │
         └───> [Local Tor Proxy] ──(6-Hop Encrypted Circuit)──> [Tor Hidden Service] ──> [sshd:8022]
-              (127.0.0.1:9050)                                 (Descriptor decrypted    (Passphrase-less,
+              (127.0.0.1:9050)                                 (Descriptor decrypted    (Key auth only,
                                                                with x25519 pubkey)      passwords disabled)
 ```
 
-### The Two Cryptographic Gates:
-1. **Gate 1: Stealth Tor v3 Layer (`X25519`)**
-   * The phone's hidden service descriptor is **encrypted with your client's X25519 public key**.
-   * Any random scanner, crawler, or unauthorized user attempting to access the `.onion` address receives an immediate `Host unreachable` error at the Tor directory level. **Zero bytes ever reach your phone.**
-2. **Gate 2: Fortified SSH Layer (`Ed25519`)**
-   * Password authentication is strictly disabled (`PasswordAuthentication no`).
-   * Only your client's Ed25519 private key can authenticate.
-3. **Isolated Client Routing**:
-   * **Only the connection to the phone routes through Tor**. Your regular browsing, gaming, and downloads continue directly through your standard ISP/Wi-Fi connection.
+1. When the server publishes its hidden service descriptor to the Tor network, the descriptor is **strongly encrypted using the client's X25519 public key**.
+2. Any unauthorized crawler, bot, or ISP attempting to query or connect to your `.onion` address receives an instant `Host unreachable` error at the Tor DHT level.
+3. **Zero packets ever reach your phone.** Your phone server is completely invisible to anyone without the private authorization key.
+
+---
+
+### The Two Cryptographic Gates
+
+To execute a command or open a shell on your phone server, a packet must clear two independent cryptographic challenges:
+
+| Gate | Protocol | Algorithm | Mechanism |
+| :--- | :--- | :--- | :--- |
+| **Gate 1** | Tor v3 Onion Protocol | **X25519** (Curve25519 ECDH) | Encrypts Tor descriptor. Prevents discovery, network scanning, and circuit establishment by unauthorized parties. |
+| **Gate 2** | OpenSSH | **Ed25519** (Edwards-curve DSA) | Authenticates terminal session. Passwords strictly disabled (`PasswordAuthentication no`). |
+
+---
+
+### Isolated Client Routing
+
+Only packets destined for your phone server (`*.onion`) route through your local Tor SOCKS5 proxy (`127.0.0.1:9050`). All other traffic on your laptop or mobile client (web browsing, streaming, gaming, package updates) continues at native ISP speed through standard network interfaces.
+
+---
+
+## 📦 Prerequisites & Requirements Matrix
+
+The setup scripts feature **self-healing dependency resolution**. When launched, they check for required binaries and automatically install any missing packages using the system's native package manager (`apt`, `dnf`, `pacman`, `zypper`, or Termux `pkg`).
+
+| Device Role | Component | Required Binaries | Package Dependencies | Why It Is Strictly Needed |
+| :--- | :--- | :--- | :--- | :--- |
+| **Phone Server** (Android) | Headless Server | `sshd`, `tor`, `openssl`, `ssh-keygen`, `base32`, `pgrep`, `killall`, `termux-wake-lock` | `tor openssh openssl-tool coreutils procps psmisc termux-tools` | • `openssl-tool`: Provides the OpenSSL CLI (standard `openssl` in Termux is only headers/libs).<br>• `coreutils`: Provides GNU `base32` (Toybox base32 is incompatible).<br>• `psmisc` & `procps`: Provide `killall` and `pgrep` for process lifecycle management.<br>• `termux-tools`: Provides Android wake lock management. |
+| **PC Client** (Linux) | Workstation Client | `tor`, `nc`, `openssl`, `ssh-keygen`, `base32`, `ssh` | `tor netcat-openbsd openssl coreutils openssh-client` | • `tor`: Runs local SOCKS5 proxy (`127.0.0.1:9050`) with `ClientOnionAuthDir`.<br>• `netcat-openbsd` / `nmap-ncat`: Provides `nc -X 5` for SSH SOCKS5 ProxyCommand.<br>• `openssl` & `coreutils`: Generates X25519 client keypairs in RFC 4648 unpadded base32. |
+| **Mobile Client** (Android) | Secondary Phone | `tor`, `nc`, `openssl`, `ssh-keygen`, `base32`, `ssh`, `pgrep`, `killall` | `tor openssh netcat-openbsd openssl-tool coreutils procps psmisc` | • Mirrors PC client capabilities directly inside mobile Termux for seamless phone-to-phone management. |
 
 ---
 
 ## 📁 Repository Structure
 
-| File | Purpose |
-| :--- | :--- |
-| **`setup-server-termux.sh`** | Run on the **Server Phone** (Termux). Configures Tor, hardens SSH, disables Android sleep/doze killers, and creates management CLI tools. |
-| **`setup-client-linux.sh`** | Run on your **Linux PC**. Generates X25519/Ed25519 keys, configures Tor client auth, installs companion controls, and sets up `~/.ssh/config`. |
-| **`setup-client-termux.sh`** | Run on a **Secondary Mobile Phone** (Termux). Allows seamless mobile-to-mobile server administration over Tor. |
+```text
+stealth-tor-phone-server/
+├── LICENSE                 # MIT Open Source License
+├── README.md               # Complete architecture, operations, and troubleshooting manual
+├── .gitignore              # Ignores generated keys (*.pem, *.auth, id_*), sockets, logs
+├── setup-server-termux.sh  # Automated Server Installer for Android Termux
+├── setup-client-linux.sh   # Automated Client Installer for Linux PCs (Debian/Ubuntu/Fedora/Arch)
+└── setup-client-termux.sh  # Automated Client Installer for Android Termux Mobile Clients
+```
 
 ---
 
 ## 🚀 Quickstart Guide
 
-### Step 1: Run the Client Script on Your Laptop
-On your Linux machine, clone this repository and run the client setup script:
+### Phase 1: Setup Client (Linux PC or Secondary Phone)
+
+#### Option A: Linux PC Client
+On your Linux machine (Ubuntu, Debian, Fedora, Arch, etc.):
 
 ```bash
 git clone https://github.com/your-username/stealth-tor-phone-server.git
@@ -59,112 +131,436 @@ chmod +x setup-client-linux.sh
 ./setup-client-linux.sh
 ```
 
-**What happens:**
-* Generates your **SSH Ed25519** and **Tor X25519** cryptographic keys.
-* Displays your **Public Keys** in a formatted box on your screen.
-* Leaves the prompt open waiting for your phone's `.onion` address.
+#### Option B: Secondary Mobile Phone Client (Android Termux)
+Inside Termux on your secondary client phone:
+
+```bash
+pkg update && pkg install -y git
+git clone https://github.com/your-username/stealth-tor-phone-server.git
+cd stealth-tor-phone-server
+chmod +x setup-client-termux.sh
+./setup-client-termux.sh
+```
+
+**What the client script does:**
+1. Installs all missing dependencies (`tor`, `netcat`, `openssl`, `coreutils`).
+2. Generates an **Ed25519 SSH keypair** (`~/.ssh/phone_server_ed25519`).
+3. Generates an **X25519 Tor Client Authorization keypair** (`~/.tor_keys/x25519_priv.pem`).
+4. Prints your **Public Keys** in a formatted block on your screen:
+   ```text
+   ==================================================================
+             COPY THESE KEYS TO YOUR PHONE (SERVER SETUP)
+   ==================================================================
+   1. CLIENT TOR PUBLIC KEY:
+   descriptor:x25519:<CLIENT_TOR_X25519_PUBLIC_KEY>
+
+   2. CLIENT SSH PUBLIC KEY:
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... client-to-phone-server
+   ==================================================================
+   ```
+5. Leaves the prompt open waiting for your phone server's `.onion` address and username.
 
 ---
 
-### Step 2: Run the Server Script on Your Phone
-Open **Termux** on your Android phone and execute:
+### Phase 2: Setup Server (Android Phone)
+
+Open **Termux** on the phone intended to be your 24/7 server.
+
+> [!IMPORTANT]
+> Install Termux from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub Releases](https://github.com/termux/termux-app/releases). **Do NOT use the Google Play Store version**, which has been permanently deprecated since 2020.
+
+Clone and run the server installer:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/your-username/stealth-tor-phone-server/main/setup-server-termux.sh -o setup-server-termux.sh
+pkg update && pkg install -y git
+git clone https://github.com/your-username/stealth-tor-phone-server.git
+cd stealth-tor-phone-server
 chmod +x setup-server-termux.sh
 ./setup-server-termux.sh
 ```
 
-**During execution:**
-1. When prompted, **paste the Client Tor Public Key** displayed on your laptop screen.
-2. When prompted, **paste the Client SSH Public Key** displayed on your laptop screen.
-3. The script configures the services, applies Android Doze suppression, starts the server, and prints your **56-character `.onion` address**.
+**What the server script does:**
+1. Automatically installs `tor`, `openssh`, `openssl-tool`, `coreutils`, `procps`, `psmisc`, and `termux-tools`.
+2. Applies **Android OS Doze and Samsung Device Care immunity** (if rooted via Magisk/KernelSU) and acquires user-space wake locks.
+3. Hardens OpenSSH to port `8022` and strictly disables password authentication.
+4. Configures a Tor hidden service directory at `$PREFIX/var/lib/tor/hidden_ssh/`.
+5. Prompts you to paste the **Client Tor Public Key** and **Client SSH Public Key** displayed by your client script.
+6. Installs native CLI management tools (`start-server`, `stop-server`, `status-server`, `restart-server`, `authorize-client`).
+7. Starts the services, waits for Tor circuit generation, and displays your server credentials:
+   ```text
+   ==================================================================
+                      SETUP COMPLETE & SERVER ACTIVE!
+   ==================================================================
+   YOUR ONION ADDRESS:
+     <your-56-character-onion-address>.onion
+
+   SERVER TERMUX USERNAME:
+     u0_a300
+   ==================================================================
+   ```
 
 ---
 
-### Step 3: Complete the Client Setup
-Paste the `.onion` address printed by your phone into the waiting prompt on your laptop terminal.
+### Phase 3: Connect & Verify
+
+1. Return to your client terminal (Linux PC or second phone).
+2. Enter the **56-character `.onion` address** and **Server Username** (`u0_a300`) into the waiting prompt.
+3. The script configures `/var/lib/tor/onion_auth/phone.auth_private`, restarts the local Tor proxy, and configures `~/.ssh/config`.
+4. Connect to your phone server from anywhere:
+   ```bash
+   phone-ssh
+   ```
+   *(Or natively: `ssh phone-server`)*
 
 ---
 
-## 💻 Daily Operations
+### Phase 4: Adding Multiple Clients
 
-### Connecting from Your PC
-To connect from anywhere in the world (home, coffee shop, mobile hotspot, or abroad):
+To authorize an additional client (e.g., your laptop and your mobile phone simultaneously) without restarting existing sessions:
 
-```bash
-ssh phone-server
-```
-*(Or use the installed companion shortcut: `phone-ssh`)*
+1. Run the client installer on the new device (`setup-client-linux.sh` or `setup-client-termux.sh`) to obtain its public keys.
+2. On your phone server, run the built-in authorization command:
+   ```bash
+   authorize-client
+   ```
+3. Enter a label for the device (e.g. `work-laptop` or `mobile-client`), paste its **Tor Public Key**, and paste its **SSH Public Key**.
+4. The server automatically writes `authorized_clients/<name>.auth`, appends to `~/.ssh/authorized_keys`, and reloads Tor (`killall -HUP tor`) without dropping active connections.
 
-### Checking Server Status
-From your PC terminal:
-```bash
-status-server
-```
-* **If USB is plugged in**: Instantly queries via ADB (<0.05 seconds).
-* **If wireless/remote**: Queries securely over Tor SSH.
+---
 
-Output:
+## 💻 Daily Operations & CLI Tools
+
+### Client Companion Commands (Linux PC & Mobile Client)
+
+Both Linux PC and mobile Termux clients share an identical, standardized toolset:
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| **`phone-ssh [args]`** | `phone-ssh` | One-word shortcut to log into your phone server. Automatically verifies that the local Tor proxy is running before connecting. |
+| **`status-server`** | `status-server` | Queries your phone server over Tor and prints live daemon status, active sessions, registered clients, and battery percentage. *(On Linux, pass `--adb` for USB query)*. |
+| **`stop-server`** | `stop-server` | Sends a remote shutdown command over Tor to terminate all listeners and active sessions. |
+| **`restart-server`** | `restart-server` | Cleanly cycles the server daemons remotely over Tor. |
+| **`ssh phone-server`** | `ssh phone-server` | Standard OpenSSH command supported anywhere on your system via `~/.ssh/config`. |
+
+#### Example Status Output:
 ```text
+$ status-server
+[*] Connecting to Phone Server over Tor...
 ==========================================
         Phone Server Status
 ==========================================
-  [+] OpenSSH Daemon : RUNNING (PID: 31584)
-  [+] Tor Daemon     : RUNNING (PID: 3445)
-  [*] Active Sessions: 0
+  [+] OpenSSH Daemon : RUNNING (PID: 4291)
+  [+] Tor Daemon     : RUNNING (PID: 4292)
+  [*] Active Sessions: 1
+  [*] Auth Clients   : 2 registered
+  [*] Battery Level  : 84%
   [*] Onion Address  : <your-56-char-onion-address>.onion
 ==========================================
 ```
 
-### Server Management on the Phone (Inside Termux)
-The server script installs native CLI binaries directly into `$PREFIX/bin`:
+### Server Management Commands (Inside Phone Termux)
 
+The server script installs native executables directly into `$PREFIX/bin`:
+
+| Command | Description |
+| :--- | :--- |
+| **`start-server`** | Checks if ports `8022` and `9050` are already listening, starts `sshd` and `tor` quietly in the background, and acquires Android wakelock. |
+| **`stop-server`** | Executes an immediate, force-kill teardown (`killall -9 tor sshd sshd-session`), terminating all listening daemons and active remote shells. |
+| **`status-server`** | Uses dual-layer detection (root process query + TCP socket verification) to accurately report service health even under Android SELinux isolation. |
+| **`restart-server`** | Cleanly terminates and relaunches both daemons. |
+| **`authorize-client`** | Registers a new client device interactively or via arguments (`authorize-client <label> <tor_pub> <ssh_pub>`). |
+
+---
+
+## 🔬 Deep Dive: Internal Mechanics & Process Architecture
+
+### OpenSSH 9.8+ Process Splitting (`sshd` vs. `sshd-session`)
+
+In OpenSSH 9.8 and newer, OpenSSH split its process architecture to mitigate race conditions and security vulnerabilities:
+1. **Master Listener (`sshd`)**: Binds to port `8022` and listens for incoming connections.
+2. **Worker Session (`sshd-session`)**: Spawned whenever a client logs in. Each authenticated client terminal runs inside its own isolated `sshd-session` child process.
+
+> [!WARNING]
+> Running `pkill sshd` or `kill $(pgrep sshd)` on Linux only kills the master listener. It leaves all `sshd-session` worker processes completely untouched! Active client shells remain connected.
+> 
+> Our `stop-server` implementation guarantees a complete teardown by terminating both listeners and sessions:
+> ```bash
+> killall -9 tor sshd sshd-session 2>/dev/null
+> ```
+
+---
+
+### Tor Circuit Teardown & Linger (`ShutdownWaitLength 30`)
+
+By default, the Tor daemon enforces a 30-second graceful socket draining period (`ShutdownWaitLength 30`) when receiving a `SIGTERM` or `SIGINT` signal. During this interval, Tor stops accepting new circuits but remains resident in memory while sockets drain.
+
+Attempting to restart Tor during this 30-second window causes port-binding collisions on `127.0.0.1:9050` and lock-file contention in `$PREFIX/var/lib/tor/lock`. Our `stop-server` script sends `SIGKILL` (`killall -9 tor`) to immediately release socket bindings and file locks.
+
+---
+
+### Android SELinux Domain Process Isolation
+
+On rooted Android devices (Magisk / KernelSU), processes launched via root `su` run in the privileged SELinux domain:
+* Root Context: `u:r:magisk:s0`
+* Termux Unprivileged App Context: `u:r:untrusted_app:s0` (or `u:r:untrusted_app_30:s0`)
+
+By design, Android SELinux domain isolation prevents an `untrusted_app` from inspecting the `/proc/<pid>` directories of processes residing in the `magisk` domain. If `sshd` or `tor` was started with elevated permissions, running standard `pgrep sshd` inside the Termux app returns **0 processes found ("STOPPED")**, even though the server is fully running and accepting SSH connections!
+
+#### The Dual-Layer Detection Solution:
+`status-server` implements a dual-layer verification strategy:
+1. **Layer 1 (Process Query)**: Executes `su -c 'pgrep -x sshd'` if root is available, otherwise unprivileged `pgrep`.
+2. **Layer 2 (Socket Probe Fallback)**: If process querying fails or is blocked by SELinux, the script probes loopback TCP sockets directly using native Bash file descriptors:
+   ```bash
+   if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+       SSH_PID="ACTIVE (port 8022)"
+   fi
+   ```
+   Socket binding states cannot be hidden by process-table SELinux restrictions, ensuring accurate status reporting under all conditions.
+
+---
+
+### Android SELinux MLS Dynamic Contexts
+
+Android assigns dynamic Multi-Level Security (MLS) category pairs to every installed application (e.g., `u:object_r:app_data_file:s0:c44,c257,c512,c768`). 
+
+If a root script creates executable files inside `$PREFIX/bin` without inheriting the application's unique MLS category pair, the unprivileged Termux user receives `Permission denied` errors when trying to execute them.
+
+Our installer dynamically samples the running environment's exact SELinux context from `$PREFIX/bin/sh` and propagates it to all installed CLI utilities:
 ```bash
-start-server    # Starts Tor and OpenSSH quietly in background
-stop-server     # Force-kills all listeners and active sessions immediately
-restart-server  # Clean restart of both daemons
-status-server   # Displays running process IDs and active socket states
+TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1)
+su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/authorize-client"
 ```
 
 ---
 
-## ⚡ Android & Samsung 24/7 Keep-Alive Hardening
+### Android OS Power Management & Samsung One UI Sleep Suppression
 
-Android devices (especially Samsung One UI) aggressively kill background processes and put Wi-Fi chips to sleep when the screen turns off. 
+Modern Android aggressively suspends background processes when the screen turns off. On Samsung devices running One UI, the proprietary Samsung Device Care service (`com.samsung.android.lool`) contains an aggressive out-of-memory (OOM) killer that evicts long-running daemons regardless of standard Android settings.
 
-`setup-server-termux.sh` automatically executes the following root-level mitigations:
+`setup-server-termux.sh` applies the following permanent OS-level mitigations:
 
-1. **Suppresses Samsung Device Care**: Disables `com.samsung.android.lool` background task killer.
-2. **Wi-Fi Sleep Immunity**: Sets `wifi_sleep_policy = 2` (never sleep Wi-Fi).
-3. **Kernel Doze Whitelisting**: Adds Termux to the Linux kernel `deviceidle` whitelist.
-4. **AppOps Background Rights**: Grants unrestricted `RUN_IN_BACKGROUND` and `WAKE_LOCK`.
-5. **Always-On Power Policy**: Configures `stay_on_while_plugged_in = 3` (AC + USB).
-
-> [!TIP]
-> Keep the phone connected to power (charger). Pull down the Android notification shade, locate the Termux notification, and tap **"Acquire Wakelock"**.
+1. **Suppresses Samsung Device Care**: Disables the background killer package:
+   ```bash
+   su -c "pm disable-user --user 0 com.samsung.android.lool"
+   ```
+2. **Linux Kernel Doze Whitelisting**: Grants Termux permanent exemption from Android Doze power budgeting:
+   ```bash
+   su -c "dumpsys deviceidle whitelist +com.termux"
+   ```
+3. **AppOps Execution Rights**: Unlocks unrestricted background processing:
+   ```bash
+   su -c "cmd appops set com.termux RUN_IN_BACKGROUND allow"
+   su -c "cmd appops set com.termux RUN_ANY_IN_BACKGROUND allow"
+   su -c "cmd appops set com.termux WAKE_LOCK allow"
+   ```
+4. **Wi-Fi Chip Sleep Immunity**: Forces the Wi-Fi radio to stay awake 24/7 even during deep sleep:
+   ```bash
+   su -c "settings put global wifi_sleep_policy 2"
+   su -c "settings put global wifi_wakeup_enabled 1"
+   ```
+5. **Continuous AC Power Mode**: Keeps the CPU at baseline frequency while plugged in:
+   ```bash
+   su -c "settings put global stay_on_while_plugged_in 3"
+   ```
+6. **Userspace Wakelock**: Automatically engages `termux-wake-lock`.
 
 ---
 
-## 🔄 Key Rotation & Multi-Device Management
+### SSH Multiplexing & Connection Warmth
 
-### Authorizing a Second Device (e.g. Work Laptop or Secondary Phone)
-You can authorize multiple devices without altering existing keys:
+Negotiating a new 6-hop Tor v3 encrypted circuit from scratch takes between 3 to 8 seconds. To make daily terminal usage feel like a local LAN connection, `setup-client-linux.sh` configures OpenSSH connection multiplexing in `~/.ssh/config`:
 
-1. Run `setup-client-linux.sh` (or `setup-client-termux.sh`) on the new device to obtain its public keys.
-2. On the Phone Server (Termux), add the new authorization lock:
+```ssh-config
+Host phone-server
+    ControlMaster auto
+    ControlPath ~/.ssh/control-%C
+    ControlPersist 10m
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+    Compression yes
+```
+
+* **`ControlMaster auto` & `ControlPath`**: The first connection establishes the Tor circuit and authenticates. Subsequent terminals, file transfers (`rsync` / `scp`), or `status-server` commands reuse the active master socket.
+* **Result**: Subsequent commands execute **instantaneously (< 0.1 seconds)** with zero handshake latency.
+* **`ControlPersist 10m`**: Keeps the underlying encrypted socket warm for 10 minutes after you close your last terminal window.
+
+---
+
+## 🛠️ Manual Administration & Diagnostic Cheat Sheet
+
+For power users managing their server manually, here is a quick-reference cheat sheet of essential commands:
+
+### Process Management
+```bash
+# Check if daemons are running
+pgrep -af sshd
+pgrep -af tor
+
+# Check full process hierarchy
+ps aux | grep -E 'sshd|tor'
+
+# View live worker sessions
+pgrep -a sshd-session
+
+# Graceful Tor descriptor reload (re-reads authorized_clients without dropping circuits)
+killall -HUP tor
+
+# Hard termination of all server daemons and active shells
+killall -9 tor sshd sshd-session
+```
+
+### Network & Port Inspection
+```bash
+# Inspect listening sockets (OpenSSH on 8022, Tor on 9050)
+ss -tulpn | grep -E '8022|9050'
+
+# Check active socket using netstat (if installed)
+netstat -tuln | grep -E '8022|9050'
+
+# Pure Bash socket probe (works with zero third-party tools installed)
+(echo > /dev/tcp/127.0.0.1/8022) && echo "SSH is listening" || echo "SSH is down"
+(echo > /dev/tcp/127.0.0.1/9050) && echo "Tor is listening" || echo "Tor is down"
+```
+
+### Log File Inspection
+```bash
+# Server Tor logs (inside phone Termux)
+cat $PREFIX/var/lib/tor/tor.log
+tail -f $PREFIX/var/lib/tor/tor.log
+
+# Linux Client Tor logs (systemd)
+journalctl -u tor -n 50 --no-pager
+journalctl -u tor -f
+
+# Mobile Client Tor logs (inside secondary phone Termux)
+cat $PREFIX/var/lib/tor/client_tor.log
+```
+
+---
+
+## 🩺 Battle-Tested Troubleshooting Guide
+
+### 1. `openssl: command not found` or `base32: command not found` in Termux
+* **Cause**: On Termux, the `openssl` package provides only C libraries (`libssl.so`). The CLI binary `openssl` is packaged under `openssl-tool`. Furthermore, Toybox does not supply `base32`.
+* **Fix**: Install the missing packages:
+  ```bash
+  pkg install -y openssl-tool coreutils
+  ```
+
+---
+
+### 2. `Connection timed out during banner exchange`
+* **Cause**: The server phone has entered deep sleep (Doze mode) or the Wi-Fi chip went into power-saving mode.
+* **Fix**:
+  1. Ensure the phone is connected to a wall charger.
+  2. Pull down the Android notification shade, locate the Termux notification, and tap **"Acquire Wakelock"**.
+  3. On rooted phones, verify that sleep suppression is active:
+     ```bash
+     su -c "dumpsys deviceidle whitelist | grep termux"
+     ```
+
+---
+
+### 3. `Permission denied` when running scripts on Android
+* **Cause**: File created via root `su` lacks Termux user permissions or has an incompatible SELinux MLS category.
+* **Fix**: Restore Termux ownership and security contexts:
+  ```bash
+  chown -R $(whoami):$(whoami) $PREFIX/bin/*-server
+  chmod 755 $PREFIX/bin/*-server
+  ```
+
+---
+
+### 4. `INJECT_EVENTS` / MIUI & HyperOS Security Exception (Xiaomi/POCO)
+* **Cause**: Xiaomi devices running MIUI/HyperOS block automated inputs over ADB unless "USB debugging (Security settings)" is enabled with an active SIM card.
+* **Fix**: Run commands directly inside the Termux app on the phone screen instead of pushing them via ADB.
+
+---
+
+### 5. Tor bootstrapping stuck at 5% or 10%
+* **Cause**: The local network is blocking Tor directory authorities or system clock skew exceeds 60 seconds.
+* **Fix**:
+  1. Check device date and time (`date`). Ensure automatic network time synchronization is enabled.
+  2. Inspect the log for specific errors:
+     ```bash
+     cat $PREFIX/var/lib/tor/tor.log
+     ```
+  3. Cycle the Tor daemon:
+     ```bash
+     restart-server
+     ```
+
+---
+
+### 6. `Permission denied (publickey)` during SSH
+* **Cause**: File permissions on `~/.ssh/authorized_keys` or the private key are too permissive, causing OpenSSH to reject them.
+* **Fix**:
+  * On Phone Server:
+    ```bash
+    chmod 700 ~/.ssh
+    chmod 600 ~/.ssh/authorized_keys
+    ```
+  * On Client:
+    ```bash
+    chmod 700 ~/.ssh
+    chmod 600 ~/.ssh/phone_server_ed25519
+    ```
+
+---
+
+### 7. Client Tor Authorization Not Working (`Host unreachable`)
+* **Cause**: Syntax error in `/var/lib/tor/onion_auth/phone.auth_private` or the auth file on the server.
+* **Fix**:
+  * **On Client**: The private key auth file must follow this exact format:
+    ```text
+    <56-char-onion-without-dot-onion>:descriptor:x25519:<32-byte-unpadded-base32-private-key>
+    ```
+    *Ensure the file ends with a trailing newline and contains no spaces.*
+  * **On Server**: The public key auth file at `$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/<client>.auth` must follow this exact format:
+    ```text
+    descriptor:x25519:<32-byte-unpadded-base32-public-key>
+    ```
+    *Ensure file permission is `600` and reload Tor (`killall -HUP tor`).*
+
+---
+
+## 🛡️ Security Best Practices & Revocation
+
+### Revoking a Compromised or Lost Client Device
+
+If your laptop or secondary phone is lost or stolen, you can instantly revoke its access without rebuilding the server:
+
+1. Open Termux on your phone server.
+2. Remove the client's Tor descriptor lock:
    ```bash
-   echo "descriptor:x25519:<NEW_DEVICE_TOR_PUB>" > $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/device2.auth
-   chmod 600 $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/device2.auth
+   rm $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/<client_name>.auth
    ```
-3. Append its SSH public key:
+3. Remove the client's public key from `~/.ssh/authorized_keys`.
+4. Reload the Tor daemon:
    ```bash
-   echo "<NEW_DEVICE_SSH_PUB>" >> ~/.ssh/authorized_keys
+   killall -HUP tor
    ```
-4. Reload Tor: `killall -HUP tor`.
+5. Terminate any active sessions:
+   ```bash
+   stop-server && start-server
+   ```
+The revoked device will instantly receive `Host unreachable` at the Tor DHT layer and can never connect again.
+
+---
+
+### Backing Up Server Identity Keys
+
+Your phone server's `.onion` address is mathematically derived from its private Ed25519 identity key located at:
+`$PREFIX/var/lib/tor/hidden_ssh/hs_ed25519_secret_key`
+
+To backup or migrate your server to another phone without changing your `.onion` address:
+```bash
+# Backup key to external storage or encrypted USB
+cp $PREFIX/var/lib/tor/hidden_ssh/hs_ed25519_secret_key /sdcard/Download/
+```
 
 ---
 
 ## 📜 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for complete terms and copyright notices.

@@ -8,14 +8,13 @@
 
 set -e
 
-# Colors for terminal output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${CYAN}${BOLD}"
 echo "=================================================================="
@@ -32,12 +31,22 @@ fi
 export HOME=/data/data/com.termux/files/home
 export PREFIX=/data/data/com.termux/files/usr
 export PATH=$PREFIX/bin:$PATH
-cd $HOME
+cd "$HOME"
 
-# 2. Package Installation
-echo -e "${BLUE}[*] Step 1/5: Updating Termux repositories and installing packages...${NC}"
+# 2. Package Installation & Self-Healing Verification
+echo -e "${BLUE}[*] Step 1/5: Installing dependencies (tor, openssh, openssl-tool, coreutils, procps, psmisc, termux-tools)...${NC}"
 pkg update -y
-pkg install -y tor openssh openssl-tool coreutils
+pkg install -y tor openssh openssl-tool coreutils procps psmisc termux-tools
+
+# Verify every critical binary
+for cmd in sshd tor openssl ssh-keygen base32 pgrep killall; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] Binary $cmd not found. Attempting repair installation...${NC}"
+        pkg install -y tor openssh openssl-tool coreutils procps psmisc termux-tools
+        break
+    fi
+done
+echo -e "${GREEN}[+] Dependencies verified: sshd, tor, openssl, ssh-keygen, base32, pgrep, killall.${NC}"
 
 # 3. Android & Samsung Sleep Hardening (via Root if available)
 echo -e "${BLUE}[*] Step 2/5: Applying Android & Samsung Keep-Alive Hardening...${NC}"
@@ -61,60 +70,84 @@ termux-wake-lock 2>/dev/null || true
 
 # 4. OpenSSH Server Hardening
 echo -e "${BLUE}[*] Step 3/5: Hardening OpenSSH Server...${NC}"
-mkdir -p $PREFIX/etc/ssh
-mkdir -p $HOME/.ssh
-chmod 700 $HOME/.ssh
-touch $HOME/.ssh/authorized_keys
-chmod 600 $HOME/.ssh/authorized_keys
+mkdir -p "$PREFIX/etc/ssh"
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
 
-# Enforce no password auth in sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' $PREFIX/etc/ssh/sshd_config 2>/dev/null || echo "PasswordAuthentication no" >> $PREFIX/etc/ssh/sshd_config
-sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' $PREFIX/etc/ssh/sshd_config 2>/dev/null || echo "PubkeyAuthentication yes" >> $PREFIX/etc/ssh/sshd_config
-sed -i 's/^#*Port.*/Port 8022/' $PREFIX/etc/ssh/sshd_config 2>/dev/null || echo "Port 8022" >> $PREFIX/etc/ssh/sshd_config
+# Enforce no password auth and key-only in sshd_config
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PasswordAuthentication no" >> "$PREFIX/etc/ssh/sshd_config"
+sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PubkeyAuthentication yes" >> "$PREFIX/etc/ssh/sshd_config"
+sed -i 's/^#*Port.*/Port 8022/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "Port 8022" >> "$PREFIX/etc/ssh/sshd_config"
 
 # 5. Tor Stealth Hidden Service Configuration
 echo -e "${BLUE}[*] Step 4/5: Configuring Stealth Tor v3 Hidden Service...${NC}"
-mkdir -p $PREFIX/etc/tor
-mkdir -p $PREFIX/var/lib/tor/hidden_ssh/authorized_clients
-chmod 700 $PREFIX/var/lib/tor/hidden_ssh
-chmod 700 $PREFIX/var/lib/tor/hidden_ssh/authorized_clients
+mkdir -p "$PREFIX/etc/tor"
+mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
+chmod 700 "$PREFIX/var/lib/tor/hidden_ssh"
+chmod 700 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
 
 # Clean up existing hidden_ssh block if re-running
-if [ -f $PREFIX/etc/tor/torrc ]; then
-    grep -v "hidden_ssh" $PREFIX/etc/tor/torrc > $PREFIX/etc/tor/torrc.bak || true
-    mv $PREFIX/etc/tor/torrc.bak $PREFIX/etc/tor/torrc
+if [ -f "$PREFIX/etc/tor/torrc" ]; then
+    grep -v "hidden_ssh" "$PREFIX/etc/tor/torrc" > "$PREFIX/etc/tor/torrc.bak" || true
+    mv "$PREFIX/etc/tor/torrc.bak" "$PREFIX/etc/tor/torrc"
 fi
 
-cat << 'EOF' >> $PREFIX/etc/tor/torrc
+cat << 'EOF' >> "$PREFIX/etc/tor/torrc"
 # Stealth Tor v3 Onion Service for SSH
 HiddenServiceDir /data/data/com.termux/files/usr/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
 EOF
 
 # 6. Install Server Control Executables into $PREFIX/bin/
-echo -e "${BLUE}[*] Step 5/5: Installing Management CLI Tools (start-server, stop-server, status-server)...${NC}"
+echo -e "${BLUE}[*] Step 5/5: Installing Management CLI Tools into $PREFIX/bin/...${NC}"
 
-cat << 'EOF' > $PREFIX/bin/start-server
+# 6a. start-server (idempotent, checks ports before binding)
+cat << 'EOF' > "$PREFIX/bin/start-server"
 #!/data/data/com.termux/files/usr/bin/bash
 PREFIX=/data/data/com.termux/files/usr
-$PREFIX/bin/sshd
-nohup $PREFIX/bin/tor > $PREFIX/var/lib/tor/tor.log 2>&1 &
-echo "[+] Phone server services started (OpenSSH & Tor)."
+
+# Start sshd if not already listening
+if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+    echo "[*] OpenSSH daemon is already running (port 8022)."
+else
+    $PREFIX/bin/sshd
+    echo "[+] OpenSSH daemon started on port 8022."
+fi
+
+# Start Tor if not already listening
+if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[*] Tor daemon is already running (port 9050)."
+else
+    nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+    echo "[+] Tor daemon started in background."
+fi
+
+# Ensure Termux wakelock is active
+termux-wake-lock 2>/dev/null || true
+echo "[+] Phone server is active and protected against Doze."
 EOF
 
-cat << 'EOF' > $PREFIX/bin/stop-server
+# 6b. stop-server (terminates listener and all worker sessions)
+cat << 'EOF' > "$PREFIX/bin/stop-server"
 #!/data/data/com.termux/files/usr/bin/bash
 if command -v su >/dev/null 2>&1; then
-    su -c 'killall -9 tor sshd sshd-session 2>/dev/null'
+    su -c 'killall -9 tor sshd sshd-session 2>/dev/null || true'
 fi
-killall -9 tor sshd sshd-session 2>/dev/null
+killall -9 tor sshd sshd-session 2>/dev/null || true
+pkill -9 -x tor 2>/dev/null || true
+pkill -9 -x sshd 2>/dev/null || true
+pkill -9 sshd-session 2>/dev/null || true
 echo "[+] Phone server stopped & all active sessions terminated."
 EOF
 
-cat << 'EOF' > $PREFIX/bin/status-server
+# 6c. status-server (dual-layer detection: root pgrep + local socket probes)
+cat << 'EOF' > "$PREFIX/bin/status-server"
 #!/data/data/com.termux/files/usr/bin/bash
 PREFIX=/data/data/com.termux/files/usr
 
+# Check process IDs (dual-layer: root su if available, fallback to user space)
 if command -v su >/dev/null 2>&1; then
     SSH_PID=$(su -c 'pgrep -x sshd' 2>/dev/null | head -n 1)
     TOR_PID=$(su -c 'pgrep -x tor' 2>/dev/null | head -n 1)
@@ -125,7 +158,7 @@ else
     SESSIONS=$(pgrep sshd-session 2>/dev/null | wc -l)
 fi
 
-# Fallback to direct TCP socket probes
+# Fallback to direct TCP socket probes (bypasses SELinux process hiding)
 if [ -z "$SSH_PID" ]; then
     if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
         SSH_PID="ACTIVE (port 8022)"
@@ -138,7 +171,14 @@ if [ -z "$TOR_PID" ]; then
     fi
 fi
 
-ONION=$(cat $PREFIX/var/lib/tor/hidden_ssh/hostname 2>/dev/null)
+ONION=$(cat "$PREFIX/var/lib/tor/hidden_ssh/hostname" 2>/dev/null || true)
+AUTH_CLIENTS=$(ls "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients" 2>/dev/null | wc -l || echo 0)
+
+# Optional battery status
+BATTERY=""
+if [ -f /sys/class/power_supply/battery/capacity ]; then
+    BATTERY=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
+fi
 
 echo "=========================================="
 echo "        Phone Server Status"
@@ -156,70 +196,113 @@ else
 fi
 
 echo "  [*] Active Sessions: $SESSIONS"
+echo "  [*] Auth Clients   : $AUTH_CLIENTS registered"
+
+if [ -n "$BATTERY" ]; then
+    echo "  [*] Battery Level  : ${BATTERY}%"
+fi
+
 if [ -n "$ONION" ]; then
     echo "  [*] Onion Address  : $ONION"
 fi
 echo "=========================================="
 EOF
 
-cat << 'EOF' > $PREFIX/bin/restart-server
+# 6d. restart-server
+cat << 'EOF' > "$PREFIX/bin/restart-server"
 #!/data/data/com.termux/files/usr/bin/bash
+PREFIX=/data/data/com.termux/files/usr
 $PREFIX/bin/stop-server
 sleep 1
 $PREFIX/bin/start-server
 EOF
 
-chmod 755 $PREFIX/bin/start-server
-chmod 755 $PREFIX/bin/stop-server
-chmod 755 $PREFIX/bin/status-server
-chmod 755 $PREFIX/bin/restart-server
+# 6e. authorize-client (Allows registering additional client devices anytime)
+cat << 'EOF' > "$PREFIX/bin/authorize-client"
+#!/data/data/com.termux/files/usr/bin/bash
+# ==============================================================================
+# Authorize a New Client Device (Phone Server)
+# ==============================================================================
+PREFIX=/data/data/com.termux/files/usr
+HOME=/data/data/com.termux/files/home
 
-# Set proper SELinux MLS context if on Android root
+CLIENT_NAME="$1"
+TOR_PUB="$2"
+SSH_PUB="$3"
+
+if [ -z "$CLIENT_NAME" ]; then
+    read -p "Enter a label for this client device [default: client]: " CLIENT_NAME
+    CLIENT_NAME=${CLIENT_NAME:-client}
+fi
+
+if [ -z "$TOR_PUB" ]; then
+    read -p "Paste Client Tor Public Key (descriptor:x25519:...): " TOR_PUB
+fi
+
+if [ -z "$SSH_PUB" ]; then
+    read -p "Paste Client SSH Public Key (ssh-ed25519 AAAA...): " SSH_PUB
+fi
+
+if [ -n "$TOR_PUB" ]; then
+    CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://' | tr -d ' \n\r')
+    mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
+    echo "descriptor:x25519:$CLEAN_PUB" > "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
+    chmod 600 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
+    echo "[+] Tor authorization registered: ${CLIENT_NAME}.auth"
+fi
+
+if [ -n "$SSH_PUB" ]; then
+    mkdir -p "$HOME/.ssh"
+    echo "$SSH_PUB" | tr -d '\r' >> "$HOME/.ssh/authorized_keys"
+    chmod 600 "$HOME/.ssh/authorized_keys"
+    echo "[+] SSH Public Key authorized in ~/.ssh/authorized_keys"
+fi
+
+# Signal Tor to reload authorization descriptors without dropping circuits
 if command -v su >/dev/null 2>&1; then
-    su -c 'chcon u:object_r:app_data_file:s0:c44,c257,c512,c768 /data/data/com.termux/files/usr/bin/*-server 2>/dev/null || true'
+    su -c 'killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null' || true
+else
+    killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null || true
+fi
+echo "[+] Tor reloaded. Client '$CLIENT_NAME' is authorized!"
+EOF
+
+chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client"
+
+# Dynamically apply exact SELinux MLS context if on Android root
+if command -v su >/dev/null 2>&1; then
+    TERMUX_CTX=$(ls -ldZ "$PREFIX/bin/sh" 2>/dev/null | grep -o 'u:object_r:app_data_file:[^ ]*' | head -n 1 || true)
+    if [ -n "$TERMUX_CTX" ]; then
+        su -c "chcon $TERMUX_CTX $PREFIX/bin/*-server $PREFIX/bin/authorize-client 2>/dev/null || true"
+    fi
 fi
 
 # 7. Interactive Client Authorization Setup
 echo ""
 echo -e "${YELLOW}${BOLD}--- CLIENT AUTHORIZATION REGISTRATION ---${NC}"
-echo "To grant your PC or mobile device access to this server, paste its generated keys."
+echo "To grant your PC or mobile device access to this server, register its generated keys."
 echo ""
 
-read -p "Enter a label for this client device [default: laptop]: " CLIENT_NAME
-CLIENT_NAME=${CLIENT_NAME:-laptop}
-
-read -p "Paste Client Tor Public Key (52 chars base32 or descriptor:x25519:...): " TOR_PUB
-if [ -n "$TOR_PUB" ]; then
-    # Strip descriptor:x25519: prefix if user pasted it
-    CLEAN_PUB=$(echo "$TOR_PUB" | sed 's/descriptor:x25519://')
-    echo "descriptor:x25519:$CLEAN_PUB" > $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth
-    chmod 600 $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth
-    echo -e "${GREEN}[+] Tor authorization key saved for client: ${CLIENT_NAME}${NC}"
-fi
-
-read -p "Paste Client SSH Public Key (ssh-ed25519 AAAA...): " SSH_PUB
-if [ -n "$SSH_PUB" ]; then
-    echo "$SSH_PUB" >> $HOME/.ssh/authorized_keys
-    chmod 600 $HOME/.ssh/authorized_keys
-    echo -e "${GREEN}[+] SSH Public Key authorized.${NC}"
-fi
+"$PREFIX/bin/authorize-client"
 
 # 8. Start Services and Obtain Onion Hostname
 echo ""
 echo -e "${BLUE}[*] Starting services and establishing Tor circuits...${NC}"
-stop-server >/dev/null 2>&1 || true
+"$PREFIX/bin/stop-server" >/dev/null 2>&1 || true
 sleep 1
-start-server >/dev/null
+"$PREFIX/bin/start-server" >/dev/null
 
 echo -e "${YELLOW}[*] Waiting for Tor to publish service descriptor and generate .onion address...${NC}"
 ONION_ADDR=""
 for i in $(seq 1 40); do
-    if [ -f $PREFIX/var/lib/tor/hidden_ssh/hostname ]; then
-        ONION_ADDR=$(cat $PREFIX/var/lib/tor/hidden_ssh/hostname)
+    if [ -f "$PREFIX/var/lib/tor/hidden_ssh/hostname" ]; then
+        ONION_ADDR=$(cat "$PREFIX/var/lib/tor/hidden_ssh/hostname")
         break
     fi
     sleep 1
 done
+
+CURRENT_USER=$(whoami)
 
 echo ""
 echo -e "${GREEN}${BOLD}=================================================================="
@@ -229,14 +312,18 @@ if [ -n "$ONION_ADDR" ]; then
     echo -e "${CYAN}${BOLD}YOUR ONION ADDRESS:${NC}"
     echo -e "${YELLOW}${BOLD}  $ONION_ADDR${NC}"
     echo ""
-    echo "Copy this onion address into your client setup script."
+    echo -e "${CYAN}${BOLD}SERVER TERMUX USERNAME:${NC}"
+    echo -e "${YELLOW}${BOLD}  $CURRENT_USER${NC}"
+    echo ""
+    echo "Provide this Onion Address and Username to your client setup scripts."
 else
     echo -e "${RED}[!] Tor is still bootstrapping. Check 'cat $PREFIX/var/lib/tor/tor.log' in a moment.${NC}"
 fi
 echo ""
 echo -e "${BOLD}Management commands installed:${NC}"
-echo "  • start-server   : Start background services"
-echo "  • stop-server    : Terminate all listeners and active sessions"
-echo "  • status-server  : Display active PIDs and onion domain"
-echo "  • restart-server : Cleanly cycle the server"
+echo "  • start-server     : Start background services (OpenSSH & Tor)"
+echo "  • stop-server      : Force terminate all listeners and active sessions"
+echo "  • status-server    : Display active PIDs, sockets, clients, and onion address"
+echo "  • restart-server   : Cleanly cycle the server"
+echo "  • authorize-client : Register additional client devices anytime"
 echo "=================================================================="

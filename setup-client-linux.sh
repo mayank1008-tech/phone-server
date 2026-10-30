@@ -22,7 +22,7 @@ echo "      STEALTH TOR v3 CLIENT SETUP FOR LINUX                      "
 echo "=================================================================="
 echo -e "${NC}"
 
-# Helper for sudo commands
+# Helper for privileged commands
 run_sudo() {
     if [ "$EUID" -eq 0 ]; then
         "$@"
@@ -31,23 +31,33 @@ run_sudo() {
     fi
 }
 
-# 1. Package Installation
-echo -e "${BLUE}[*] Step 1/5: Checking dependencies (tor, netcat, openssl)...${NC}"
-if ! command -v tor >/dev/null 2>&1 || ! command -v nc >/dev/null 2>&1; then
-    echo -e "${YELLOW}[*] Installing Tor and Netcat...${NC}"
+# 1. Package Installation & Self-Healing Verification
+echo -e "${BLUE}[*] Step 1/5: Checking dependencies (tor, netcat, openssl, base32)...${NC}"
+install_needed=0
+for cmd in tor nc openssl ssh-keygen base32; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        install_needed=1
+        break
+    fi
+done
+
+if [ "$install_needed" -eq 1 ]; then
+    echo -e "${YELLOW}[*] Installing missing dependencies...${NC}"
     if command -v apt-get >/dev/null 2>&1; then
         run_sudo apt-get update -y
-        run_sudo apt-get install -y tor netcat-openbsd openssl
+        run_sudo apt-get install -y tor netcat-openbsd openssl coreutils
     elif command -v dnf >/dev/null 2>&1; then
-        run_sudo dnf install -y tor nmap-ncat openssl
+        run_sudo dnf install -y tor nmap-ncat openssl coreutils
     elif command -v pacman >/dev/null 2>&1; then
-        run_sudo pacman -Sy --noconfirm tor openbsd-netcat openssl
+        run_sudo pacman -Sy --noconfirm tor openbsd-netcat openssl coreutils
+    elif command -v zypper >/dev/null 2>&1; then
+        run_sudo zypper install -y tor netcat-openbsd openssl coreutils
     else
-        echo -e "${RED}[!] Unsupported package manager. Please install tor and netcat manually.${NC}"
+        echo -e "${RED}[!] Unsupported package manager. Please install tor, netcat, and openssl manually.${NC}"
         exit 1
     fi
 fi
-echo -e "${GREEN}[+] Dependencies verified.${NC}"
+echo -e "${GREEN}[+] Dependencies verified: tor, nc, openssl, ssh-keygen, base32.${NC}"
 
 # 2. SSH Key Generation (Ed25519)
 echo -e "${BLUE}[*] Step 2/5: Generating SSH Ed25519 Keypair...${NC}"
@@ -104,9 +114,12 @@ if ! run_sudo grep -q "ClientOnionAuthDir" /etc/tor/torrc 2>/dev/null; then
     echo "ClientOnionAuthDir /var/lib/tor/onion_auth" | run_sudo tee -a /etc/tor/torrc >/dev/null
 fi
 
-# 6. Prompt for Onion Address
+# 6. Prompt for Onion Address and Username
 echo -e "${YELLOW}Please enter the 56-character .onion address from your Phone Server:${NC}"
 read -p "Server Onion Address (e.g. abcdef...onion): " INPUT_ONION
+
+read -p "Server Termux Username (run 'whoami' on phone) [default: u0_a300]: " SERVER_USER
+SERVER_USER=${SERVER_USER:-u0_a300}
 
 CLEAN_ONION=$(echo "$INPUT_ONION" | sed 's/\.onion//' | tr -d ' ')
 
@@ -114,29 +127,38 @@ if [ -n "$CLEAN_ONION" ]; then
     AUTH_FILE_CONTENT="${CLEAN_ONION}:descriptor:x25519:${TOR_PRIV_KEY}"
     echo "$AUTH_FILE_CONTENT" | run_sudo tee /var/lib/tor/onion_auth/phone.auth_private >/dev/null
     run_sudo chmod 600 /var/lib/tor/onion_auth/phone.auth_private
-    run_sudo chown -R debian-tor:debian-tor /var/lib/tor/onion_auth 2>/dev/null || true
+    
+    # Auto-detect Tor daemon system user (debian-tor on Debian/Ubuntu, tor on Arch/Fedora)
+    TOR_USER="debian-tor"
+    if id tor >/dev/null 2>&1; then
+        TOR_USER="tor"
+    fi
+    run_sudo chown -R ${TOR_USER}:${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || true
     echo -e "${GREEN}[+] Saved private authorization key to /var/lib/tor/onion_auth/phone.auth_private${NC}"
     
     # Restart Tor service
     echo -e "${BLUE}[*] Restarting system Tor service...${NC}"
-    run_sudo systemctl restart tor || run_sudo service tor restart || true
+    run_sudo systemctl restart tor 2>/dev/null || run_sudo service tor restart 2>/dev/null || true
 else
     echo -e "${YELLOW}[!] Skipped onion address mapping. You can add it later to /var/lib/tor/onion_auth/phone.auth_private${NC}"
 fi
 
-# 7. Configure ~/.ssh/config
+# 7. Configure ~/.ssh/config (Clean & Idempotent with boundary markers)
 echo -e "${BLUE}[*] Step 5/5: Configuring ~/.ssh/config for instantaneous multiplexed connection...${NC}"
 FULL_ONION="${CLEAN_ONION:-YOUR_ONION_ADDRESS}.onion"
 
-# Remove old phone-server block if present
-if [ -f "$HOME/.ssh/config" ]; then
-    sed -i '/^Host phone-server$/,/^Host /{ /^Host phone-server$/d; /^Host /!d; }' "$HOME/.ssh/config" 2>/dev/null || true
-fi
+touch "$HOME/.ssh/config"
+chmod 600 "$HOME/.ssh/config"
+
+# Strip existing phone-server blocks (both tagged and legacy untagged)
+sed -i '/# --- START STEALTH TOR PHONE SERVER CONFIG ---/,/# --- END STEALTH TOR PHONE SERVER CONFIG ---/d' "$HOME/.ssh/config" 2>/dev/null || true
+sed -i '/^Host phone-server$/,/^Host /{ /^Host phone-server$/d; /^Host /!d; }' "$HOME/.ssh/config" 2>/dev/null || true
 
 cat << EOF >> "$HOME/.ssh/config"
+# --- START STEALTH TOR PHONE SERVER CONFIG ---
 Host phone-server
     HostName $FULL_ONION
-    User u0_a300
+    User $SERVER_USER
     Port 8022
     IdentityFile $SSH_KEY_FILE
     IdentitiesOnly yes
@@ -147,51 +169,100 @@ Host phone-server
     ControlPath ~/.ssh/control-%C
     ControlPersist 10m
     ProxyCommand nc -X 5 -x 127.0.0.1:9050 %h %p
+# --- END STEALTH TOR PHONE SERVER CONFIG ---
 EOF
-chmod 600 "$HOME/.ssh/config"
 
 # 8. Install Local PC Management Scripts into ~/.local/bin/
 mkdir -p "$HOME/.local/bin"
 
+# 8a. status-server
 cat << 'EOF' > "$HOME/.local/bin/status-server"
 #!/bin/bash
-if adb devices 2>/dev/null | grep -q "device$"; then
-    adb shell su -g 10300 -G 3003 10300 -c '/data/data/com.termux/files/usr/bin/status-server' 2>/dev/null || \
-    adb shell '/data/data/com.termux/files/usr/bin/status-server'
-else
-    echo "[*] Connecting to phone server over Tor..."
-    ssh -o ConnectTimeout=15 phone-server status-server
+# Verify local Tor SOCKS proxy is active
+if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
+    sudo systemctl start tor 2>/dev/null || sudo service tor start 2>/dev/null || true
+    sleep 2
 fi
+
+if [ "$1" == "--adb" ]; then
+    echo "[*] Querying Phone Server status directly via ADB..."
+    adb shell '/data/data/com.termux/files/usr/bin/status-server'
+    exit $?
+fi
+
+echo "[*] Connecting to Phone Server over Tor..."
+ssh -o ConnectTimeout=20 phone-server status-server
 EOF
 
+# 8b. stop-server
 cat << 'EOF' > "$HOME/.local/bin/stop-server"
 #!/bin/bash
-if adb devices 2>/dev/null | grep -q "device$"; then
-    adb shell su -g 10300 -G 3003 10300 -c '/data/data/com.termux/files/usr/bin/stop-server' 2>/dev/null || \
-    adb shell '/data/data/com.termux/files/usr/bin/stop-server'
-else
-    ssh -o ConnectTimeout=15 phone-server stop-server
+if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
+    sudo systemctl start tor 2>/dev/null || sudo service tor start 2>/dev/null || true
+    sleep 2
 fi
+
+if [ "$1" == "--adb" ]; then
+    echo "[*] Stopping Phone Server directly via ADB..."
+    adb shell '/data/data/com.termux/files/usr/bin/stop-server'
+    exit $?
+fi
+
+echo "[*] Sending stop signal to Phone Server over Tor..."
+ssh -o ConnectTimeout=20 phone-server stop-server
 EOF
 
+# 8c. restart-server
+cat << 'EOF' > "$HOME/.local/bin/restart-server"
+#!/bin/bash
+if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
+    sudo systemctl start tor 2>/dev/null || sudo service tor start 2>/dev/null || true
+    sleep 2
+fi
+
+if [ "$1" == "--adb" ]; then
+    echo "[*] Restarting Phone Server directly via ADB..."
+    adb shell '/data/data/com.termux/files/usr/bin/restart-server'
+    exit $?
+fi
+
+echo "[*] Restarting Phone Server over Tor..."
+ssh -o ConnectTimeout=20 phone-server restart-server
+EOF
+
+# 8d. phone-ssh
 cat << 'EOF' > "$HOME/.local/bin/phone-ssh"
 #!/bin/bash
+if ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[!] Local Tor proxy (127.0.0.1:9050) is not listening. Starting Tor..."
+    sudo systemctl start tor 2>/dev/null || sudo service tor start 2>/dev/null || true
+    sleep 2
+fi
 ssh phone-server "$@"
 EOF
 
-chmod +x "$HOME/.local/bin/status-server"
-chmod +x "$HOME/.local/bin/stop-server"
-chmod +x "$HOME/.local/bin/phone-ssh"
+chmod +x "$HOME/.local/bin/status-server" "$HOME/.local/bin/stop-server" "$HOME/.local/bin/restart-server" "$HOME/.local/bin/phone-ssh"
+
+# Ensure ~/.local/bin is in PATH in ~/.bashrc
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+    fi
+fi
 
 echo ""
 echo -e "${GREEN}${BOLD}=================================================================="
 echo "                   LINUX CLIENT CONFIGURATION COMPLETE!           "
 echo "==================================================================${NC}"
 echo -e "You can now connect to your phone server from anywhere in the world:"
-echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}"
+echo -e "${YELLOW}${BOLD}  ssh phone-server${NC}  or  ${YELLOW}${BOLD}phone-ssh${NC}"
 echo ""
-echo "Convenience commands available:"
-echo "  • status-server : Inspect phone server status (via ADB if wired, or Tor if wireless)"
-echo "  • stop-server   : Terminate phone server daemons remotely"
-echo "  • phone-ssh     : Quick alias for ssh phone-server"
+echo "Companion commands available:"
+echo "  • phone-ssh      : Quick alias for ssh phone-server"
+echo "  • status-server  : Query phone server status over Tor (or pass --adb)"
+echo "  • stop-server    : Force terminate phone server daemons remotely"
+echo "  • restart-server : Cleanly cycle the server daemons remotely"
 echo "=================================================================="

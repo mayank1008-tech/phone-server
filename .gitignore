@@ -13,6 +13,7 @@
 *.auth_private
 phone_server_*
 id_*
+client_public_keys.txt
 
 # Logs and Runtime State
 *.log
