@@ -93,10 +93,13 @@ echo -e "${GREEN}===============================================================
 echo ""
 
 # Save a copy of public keys to file for easy retrieval
-cat << KEYSEOF > /sdcard/Download/client_public_keys.txt 2>/dev/null || cat << KEYSEOF > "$HOME/client_public_keys.txt"
-TOR_PUB=descriptor:x25519:$TOR_PUB_KEY
-SSH_PUB=$SSH_PUB_CONTENT
-KEYSEOF
+{
+    echo "TOR_PUB=descriptor:x25519:$TOR_PUB_KEY"
+    echo "SSH_PUB=$SSH_PUB_CONTENT"
+} > /sdcard/Download/client_public_keys.txt 2>/dev/null || {
+    echo "TOR_PUB=descriptor:x25519:$TOR_PUB_KEY"
+    echo "SSH_PUB=$SSH_PUB_CONTENT"
+} > "$HOME/client_public_keys.txt"
 
 # 5. Configure Client Tor Authorization Directory
 echo -e "${BLUE}[*] Step 4/5: Configuring Client Tor Directory...${NC}"
