@@ -81,6 +81,12 @@ echo -e "${YELLOW}${BOLD}$SSH_PUB_CONTENT${NC}"
 echo -e "${GREEN}==================================================================${NC}"
 echo ""
 
+# Save a copy of public keys to file for easy retrieval
+cat << KEYSEOF > /sdcard/Download/client_public_keys.txt 2>/dev/null || cat << KEYSEOF > "$HOME/client_public_keys.txt"
+TOR_PUB=descriptor:x25519:$TOR_PUB_KEY
+SSH_PUB=$SSH_PUB_CONTENT
+KEYSEOF
+
 # 5. Configure Client Tor Authorization Directory
 echo -e "${BLUE}[*] Step 4/5: Configuring Client Tor Directory...${NC}"
 mkdir -p "$PREFIX/var/lib/tor/onion_auth"
@@ -90,9 +96,12 @@ if ! grep -q "ClientOnionAuthDir" "$PREFIX/etc/tor/torrc" 2>/dev/null; then
     echo "ClientOnionAuthDir $PREFIX/var/lib/tor/onion_auth" >> "$PREFIX/etc/tor/torrc"
 fi
 
-# 6. Prompt for Server Onion Address
-echo -e "${YELLOW}Please enter the 56-character .onion address of your main Server:${NC}"
-read -p "Server Onion Address (e.g. abcdef...onion): " INPUT_ONION
+# 6. Prompt for Server Onion Address (accepts $1 argument or prompts)
+INPUT_ONION="${1:-}"
+if [ -z "$INPUT_ONION" ]; then
+    echo -e "${YELLOW}Please enter the 56-character .onion address of your main Server:${NC}"
+    read -p "Server Onion Address (e.g. abcdef...onion): " INPUT_ONION
+fi
 
 CLEAN_ONION=$(echo "$INPUT_ONION" | sed 's/\.onion//' | tr -d ' ')
 
