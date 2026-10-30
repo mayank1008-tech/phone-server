@@ -37,7 +37,7 @@ cd $HOME
 # 2. Package Installation
 echo -e "${BLUE}[*] Step 1/5: Updating Termux repositories and installing packages...${NC}"
 pkg update -y
-pkg install -y tor openssh
+pkg install -y tor openssh openssl-tool coreutils
 
 # 3. Android & Samsung Sleep Hardening (via Root if available)
 echo -e "${BLUE}[*] Step 2/5: Applying Android & Samsung Keep-Alive Hardening...${NC}"

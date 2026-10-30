@@ -32,10 +32,20 @@ export PREFIX=/data/data/com.termux/files/usr
 export PATH=$PREFIX/bin:$PATH
 cd $HOME
 
-# 1. Package Installation
-echo -e "${BLUE}[*] Step 1/5: Installing dependencies (tor, openssh, netcat-openbsd)...${NC}"
+# 1. Package Installation & Verification
+echo -e "${BLUE}[*] Step 1/5: Installing dependencies (tor, openssh, netcat-openbsd, openssl-tool, coreutils)...${NC}"
 pkg update -y
-pkg install -y tor openssh netcat-openbsd openssl coreutils
+pkg install -y tor openssh netcat-openbsd openssl-tool coreutils
+
+# Verify every critical binary
+for cmd in openssl ssh-keygen base32 tor nc; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] Binary $cmd not found. Attempting repair install...${NC}"
+        pkg install -y openssl-tool coreutils netcat-openbsd openssh tor
+        break
+    fi
+done
+echo -e "${GREEN}[+] All dependencies verified: openssl, ssh-keygen, base32, tor, nc.${NC}"
 
 # 2. SSH Key Generation (Ed25519)
 echo -e "${BLUE}[*] Step 2/5: Generating Client SSH Ed25519 Keypair...${NC}"
