@@ -85,10 +85,11 @@ ssh-keygen -A >/dev/null 2>&1 || true
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PasswordAuthentication no" >> "$PREFIX/etc/ssh/sshd_config"
 sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PubkeyAuthentication yes" >> "$PREFIX/etc/ssh/sshd_config"
 sed -i 's/^#*Port.*/Port 8022/' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "Port 8022" >> "$PREFIX/etc/ssh/sshd_config"
+sed -i 's|^#*PidFile.*|PidFile '$PREFIX'/var/run/sshd.pid|' "$PREFIX/etc/ssh/sshd_config" 2>/dev/null || echo "PidFile $PREFIX/var/run/sshd.pid" >> "$PREFIX/etc/ssh/sshd_config"
 
 # 5. Tor Stealth Hidden Service Configuration
 echo -e "${BLUE}[*] Step 4/5: Configuring Stealth Tor v3 Hidden Service...${NC}"
-mkdir -p "$PREFIX/etc/tor"
+mkdir -p "$PREFIX/etc/tor" "$PREFIX/var/run" "$PREFIX/var/lib/tor"
 mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
 chmod 700 "$PREFIX/var/lib/tor/hidden_ssh"
 chmod 700 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
@@ -106,6 +107,10 @@ cat << EOF >> "$PREFIX/etc/tor/torrc"
 HiddenServiceDir $PREFIX/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
 
+# Process & Data Isolation
+PidFile $PREFIX/var/run/tor.pid
+DataDirectory $PREFIX/var/lib/tor
+
 # Mobile Dynamic IP & NAT Keepalive Tuning
 KeepalivePeriod 30
 ConnectionPadding 1
@@ -122,31 +127,55 @@ if [ -f "$HOME/.bashrc" ]; then
     sed -i '/alias start-server=/d; /alias stop-server=/d; /alias status-server=/d; /alias restart-server=/d' "$HOME/.bashrc" 2>/dev/null || true
 fi
 
-# 6a. start-server (idempotent, checks ports before binding)
+# 6a. start-server (idempotent, checks verified PID and ports)
 cat << 'EOF' > "$PREFIX/bin/start-server"
 #!/data/data/com.termux/files/usr/bin/bash
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+mkdir -p "$PREFIX/var/run" "$PREFIX/var/lib/tor" 2>/dev/null || true
+SSHD_PID_FILE="$PREFIX/var/run/sshd.pid"
+TOR_PID_FILE="$PREFIX/var/run/tor.pid"
 
 # Ensure host keys exist
 ssh-keygen -A >/dev/null 2>&1 || true
 
-# Start sshd if not already listening
-if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1; then
-    echo "[*] OpenSSH daemon is already running (port 8022)."
+# Start sshd if not already running with verified PID
+SSHD_RUNNING=0
+if [ -f "$SSHD_PID_FILE" ]; then
+    SSHD_PID=$(cat "$SSHD_PID_FILE" 2>/dev/null)
+    if [ -n "$SSHD_PID" ] && kill -0 "$SSHD_PID" 2>/dev/null; then
+        SSHD_RUNNING=1
+    fi
+fi
+if [ "$SSHD_RUNNING" -eq 1 ] && (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+    echo "[*] OpenSSH daemon is already running (PID: $SSHD_PID, port 8022)."
 else
+    rm -f "$SSHD_PID_FILE" 2>/dev/null || true
     $PREFIX/bin/sshd
     echo "[+] OpenSSH daemon started on port 8022."
 fi
 
-# Start Tor if not already listening
-if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1 || pidof tor >/dev/null 2>&1; then
-    echo "[*] Tor daemon is already running (port 9050)."
+# Start Tor if not already running with verified PID
+TOR_RUNNING=0
+if [ -f "$TOR_PID_FILE" ]; then
+    TOR_PID=$(cat "$TOR_PID_FILE" 2>/dev/null)
+    if [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
+        TOR_RUNNING=1
+    fi
+fi
+if [ "$TOR_RUNNING" -eq 1 ] && (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+    echo "[*] Managed Tor daemon is already running (PID: $TOR_PID, port 9050)."
 else
-    if ! $PREFIX/bin/tor --verify-config >/dev/null 2>&1; then
+    rm -f "$TOR_PID_FILE" 2>/dev/null || true
+    if pidof tor >/dev/null 2>&1 || (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+        echo "[!] Terminating stale or unmanaged Tor process on port 9050..."
+        killall -9 tor 2>/dev/null || pkill -9 -x tor 2>/dev/null || true
+        sleep 1
+    fi
+    if ! "$PREFIX/bin/tor" --verify-config -f "$PREFIX/etc/tor/torrc" >/dev/null 2>&1; then
         echo "[!] Error: tor --verify-config reported invalid configuration. Tor was NOT started."
     else
-        nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
-        echo "[+] Tor daemon started in background."
+        nohup "$PREFIX/bin/tor" -f "$PREFIX/etc/tor/torrc" > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+        echo "[+] Tor daemon started with managed configuration."
     fi
 fi
 
@@ -170,7 +199,7 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 # Stop watchdog first so it does not auto-restart killed services
 pkill -9 -f "watchdog-server" 2>/dev/null || true
-rm -f "$PREFIX/var/run/watchdog-server.pid" 2>/dev/null || true
+rm -f "$PREFIX/var/run/watchdog-server.pid" "$PREFIX/var/run/tor.pid" "$PREFIX/var/run/sshd.pid" 2>/dev/null || true
 
 if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
     su -c 'killall -9 tor sshd sshd-session 2>/dev/null || true'
@@ -322,16 +351,44 @@ if [ "$1" == "--revoke" ] || [ "$1" == "revoke" ] || [ "$1" == "-r" ]; then
         echo "[!] Error: Invalid client name for revocation."
         exit 1
     fi
+
     TARGET_AUTH="$AUTH_DIR/${REVOKE_NAME}.auth"
+    TARGET_SSH="$AUTH_DIR/${REVOKE_NAME}.ssh"
+    REMOVED_TOR=0
+    REMOVED_SSH=0
+
+    # 1. Remove Tor client descriptor authorization
     if [ -f "$TARGET_AUTH" ]; then
         rm -f "$TARGET_AUTH"
-        if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config >/dev/null 2>&1; then
+        REMOVED_TOR=1
+    fi
+
+    # 2. Remove client SSH public key from ~/.ssh/authorized_keys
+    if [ -f "$HOME/.ssh/authorized_keys" ]; then
+        if [ -f "$TARGET_SSH" ]; then
+            SSH_BLOB=$(awk '{print $2}' "$TARGET_SSH" 2>/dev/null)
+            if [ -n "$SSH_BLOB" ]; then
+                sed -i "\|$SSH_BLOB|d" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+                REMOVED_SSH=1
+            fi
+            rm -f "$TARGET_SSH"
+        fi
+        if grep -q "phone-server-client:${REVOKE_NAME}$" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+            sed -i "/phone-server-client:${REVOKE_NAME}$/d" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+            REMOVED_SSH=1
+        fi
+    fi
+
+    if [ "$REMOVED_TOR" -eq 1 ] || [ "$REMOVED_SSH" -eq 1 ]; then
+        if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config -f "$PREFIX/etc/tor/torrc" >/dev/null 2>&1; then
             echo "[!] Warning: tor --verify-config failed after removing authorization file."
         fi
         pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
-        echo "[+] Client '$REVOKE_NAME' authorization file removed and Tor reloaded."
+        echo "[+] Client '$REVOKE_NAME' revoked successfully:"
+        [ "$REMOVED_TOR" -eq 1 ] && echo "    • Tor authorization ($TARGET_AUTH) removed & Tor reloaded."
+        [ "$REMOVED_SSH" -eq 1 ] && echo "    • SSH public key removed from ~/.ssh/authorized_keys."
     else
-        echo "[-] Client authorization '$TARGET_AUTH' not found."
+        echo "[-] Client '$REVOKE_NAME' not found in Tor authorization or SSH keys."
     fi
     exit 0
 fi
@@ -363,9 +420,9 @@ CLEAN_SSH=$(echo "$SSH_PUB" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:s
 KEYS_ADDED=0
 
 if [ -n "$CLEAN_PUB" ]; then
-    # Strict validation: RFC 4648 unpadded Base32 (32-byte key is 52 or 56 chars of A-Z, 2-7)
-    if ! echo "$CLEAN_PUB" | grep -E -q '^[a-zA-Z2-7]{52,56}$'; then
-        echo "[!] Error: Invalid Tor X25519 public key format. Expected 52-56 Base32 characters [a-z, 2-7]."
+    # Strict validation: RFC 4648 unpadded Base32 Curve25519 public key is exactly 52 characters (A-Z, 2-7)
+    if ! echo "$CLEAN_PUB" | grep -E -q '^[a-zA-Z2-7]{52}$'; then
+        echo "[!] Error: Invalid Tor X25519 public key format. Expected exactly 52 Base32 characters [a-z, 2-7]."
         exit 1
     fi
     # Atomic file write via temporary file
@@ -383,19 +440,28 @@ if [ -n "$CLEAN_SSH" ]; then
         echo "[!] Error: Invalid SSH public key format. Expected 'ssh-ed25519 AAAA...'."
         exit 1
     fi
-    if ! grep -qF "$CLEAN_SSH" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
-        echo "$CLEAN_SSH" >> "$HOME/.ssh/authorized_keys"
-        chmod 600 "$HOME/.ssh/authorized_keys"
-        echo "[+] SSH Public Key authorized in ~/.ssh/authorized_keys"
-    else
-        echo "[*] SSH Public Key is already present in ~/.ssh/authorized_keys"
+    SSH_KEY_TYPE=$(echo "$CLEAN_SSH" | awk '{print $1}')
+    SSH_KEY_BLOB=$(echo "$CLEAN_SSH" | awk '{print $2}')
+    TAGGED_SSH="$SSH_KEY_TYPE $SSH_KEY_BLOB phone-server-client:${CLIENT_NAME}"
+
+    mkdir -p "$HOME/.ssh"
+    # Deduplicate existing entries for this client label or key blob
+    if [ -f "$HOME/.ssh/authorized_keys" ]; then
+        sed -i "/phone-server-client:${CLIENT_NAME}$/d" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+        sed -i "\|$SSH_KEY_BLOB|d" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
     fi
+    echo "$TAGGED_SSH" >> "$HOME/.ssh/authorized_keys"
+    chmod 600 "$HOME/.ssh/authorized_keys"
+    # Store reference copy for reciprocal revocation
+    echo "$TAGGED_SSH" > "$AUTH_DIR/${CLIENT_NAME}.ssh"
+    chmod 600 "$AUTH_DIR/${CLIENT_NAME}.ssh"
+    echo "[+] SSH Public Key authorized in ~/.ssh/authorized_keys (Label: phone-server-client:${CLIENT_NAME})"
     KEYS_ADDED=1
 fi
 
 if [ "$KEYS_ADDED" -eq 1 ]; then
     # Verify Tor configuration before signaling daemon
-    if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config >/dev/null 2>&1; then
+    if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config -f "$PREFIX/etc/tor/torrc" >/dev/null 2>&1; then
         echo "[!] Error: tor --verify-config failed after adding authorization! Reverting..."
         [ -n "$CLEAN_PUB" ] && rm -f "$AUTH_DIR/${CLIENT_NAME}.auth"
         exit 1
@@ -406,7 +472,7 @@ if [ "$KEYS_ADDED" -eq 1 ]; then
     else
         killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null || true
     fi
-    echo "[+] Tor reloaded. Client '$CLIENT_NAME' is authorized!"
+    echo "[+] Tor reloaded. Client '$CLIENT_NAME' is fully authorized (Tor + SSH)!"
 else
     echo "[!] No keys provided. Skipped authorization. Run 'authorize-client' anytime when ready."
 fi
@@ -442,14 +508,28 @@ LAST_SIGHUP=0
 while true; do
     sleep 8
 
-    # 1. Process supervision: ensure sshd is listening
-    if ! pidof sshd >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+    # 1. Process supervision: ensure sshd is running
+    SSHD_RUNNING=0
+    if [ -f "$PREFIX/var/run/sshd.pid" ]; then
+        SSHD_PID=$(cat "$PREFIX/var/run/sshd.pid" 2>/dev/null)
+        [ -n "$SSHD_PID" ] && kill -0 "$SSHD_PID" 2>/dev/null && SSHD_RUNNING=1
+    fi
+    if [ "$SSHD_RUNNING" -ne 1 ] && ! (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+        rm -f "$PREFIX/var/run/sshd.pid" 2>/dev/null || true
         $PREFIX/bin/sshd >/dev/null 2>&1 || true
     fi
 
-    # 2. Process supervision: ensure tor is running (dual-check: pidof + socket check)
-    if ! pidof tor >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
-        nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+    # 2. Process supervision: ensure Tor is running with valid configuration
+    TOR_RUNNING=0
+    if [ -f "$PREFIX/var/run/tor.pid" ]; then
+        TOR_PID=$(cat "$PREFIX/var/run/tor.pid" 2>/dev/null)
+        [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null && TOR_RUNNING=1
+    fi
+    if [ "$TOR_RUNNING" -ne 1 ] && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+        rm -f "$PREFIX/var/run/tor.pid" 2>/dev/null || true
+        if "$PREFIX/bin/tor" --verify-config -f "$PREFIX/etc/tor/torrc" >/dev/null 2>&1; then
+            nohup "$PREFIX/bin/tor" -f "$PREFIX/etc/tor/torrc" > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+        fi
         LAST_IPS=$(get_current_ips)
         termux-wake-lock 2>/dev/null || true
         continue

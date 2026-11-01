@@ -76,7 +76,7 @@ Most remote-access solutions rely on third-party SaaS infrastructure:
 
 ### Tor v3 Stealth Mode vs. Public Hidden Services
 
-Standard Tor onion services publish unencrypted descriptors to Distributed Hash Table (HSDir) directory nodes. Malicious directory authorities and port scanners routinely harvest public onion addresses from the DHT and scan them with automated exploit scripts.
+Standard Tor onion services publish unencrypted descriptors to Hidden Service Directory (HSDir) relays. Malicious directory mirrors and scanners routinely harvest public onion addresses from the directory and probe them.
 
 This project enforces **Tor v3 Client Authorization (Stealth Mode)**:
 
@@ -91,8 +91,8 @@ This project enforces **Tor v3 Client Authorization (Stealth Mode)**:
 ```
 
 1. When the server publishes its hidden service descriptor to the Tor network, the descriptor is **strongly encrypted using the client's X25519 public key**.
-2. Any unauthorized crawler, bot, or ISP attempting to query or connect to your `.onion` address receives an instant `Host unreachable` error at the Tor DHT level.
-3. **Zero packets ever reach your phone.** Your phone server is completely invisible to anyone without the private authorization key.
+2. Any unauthorized crawler, bot, or ISP attempting to query or connect to your `.onion` address receives an instant `Host unreachable` error at the Tor HSDir directory level without establishing a circuit to the phone.
+3. Your phone server remains completely invisible and unreachable to anyone without the private authorization key.
 
 ---
 
@@ -664,23 +664,23 @@ cat $PREFIX/var/lib/tor/client_tor.log
 
 ### Revoking a Compromised or Lost Client Device
 
-If your laptop or secondary phone is lost or stolen, you can revoke its access immediately without rebuilding the server:
+If your laptop or secondary phone is lost, stolen, or decommissioned, its access can be revoked immediately:
 
-1. Open Termux on your phone server.
-2. Remove the client's Tor descriptor lock:
-   ```bash
-   rm $PREFIX/var/lib/tor/hidden_ssh/authorized_clients/<client_name>.auth
-   ```
-3. Remove the client's public key from `~/.ssh/authorized_keys`.
-4. Reload the Tor daemon:
-   ```bash
-   killall -HUP tor
-   ```
-5. Terminate any active sessions:
-   ```bash
-   stop-server && start-server
-   ```
-The revoked device will instantly receive `Host unreachable` at the Tor DHT layer and can never connect again.
+```bash
+# On the phone server via phone-server CLI:
+phone-server revoke <client_name>
+
+# Or directly via binary:
+authorize-client --revoke <client_name>
+```
+
+**What happens automatically**:
+1. The client's Tor descriptor lock (`$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/<client_name>.auth`) is removed.
+2. The client's SSH public key is removed from `$HOME/.ssh/authorized_keys`.
+3. Tor configuration is validated (`tor --verify-config`) and reloaded via `SIGHUP`.
+4. Tor publishes fresh descriptors to HSDir relays without the revoked client's key.
+
+The revoked device will instantly receive `Host unreachable` at the Tor directory level and cannot decrypt the server's rendezvous descriptors. Even if the attacker possesses the client's SSH key, they cannot locate or establish a circuit to the phone.
 
 ---
 

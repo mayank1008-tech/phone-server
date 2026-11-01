@@ -80,20 +80,28 @@ ensure_local_tor_active() {
             sleep 1
         done
     else
+        local STARTED_SYSTEM=0
         if sudo -n true 2>/dev/null; then
             if command -v systemctl >/dev/null 2>&1; then
-                sudo -n systemctl start tor tor@default 2>/dev/null || true
+                sudo -n systemctl start tor tor@default 2>/dev/null && STARTED_SYSTEM=1 || true
             elif command -v service >/dev/null 2>&1; then
-                sudo -n service tor start 2>/dev/null || true
-            fi
-        else
-            # Start dedicated user-space Tor client without requiring sudo credentials
-            if command -v tor >/dev/null 2>&1; then
-                mkdir -p "$HOME/.local/share/tor"
-                nohup tor --DataDirectory "$HOME/.local/share/tor" --SocksPort 9050 >/dev/null 2>&1 &
+                sudo -n service tor start 2>/dev/null && STARTED_SYSTEM=1 || true
             fi
         fi
-        for i in $(seq 1 10); do
+
+        # If system service was not started, launch dedicated user-space Tor with ClientOnionAuthDir
+        if [ "$STARTED_SYSTEM" -ne 1 ] && command -v tor >/dev/null 2>&1; then
+            local USER_TOR_DIR="$HOME/.local/share/tor"
+            local USER_AUTH_DIR="$USER_TOR_DIR/onion_auth"
+            mkdir -p "$USER_AUTH_DIR"
+            chmod 700 "$USER_TOR_DIR" "$USER_AUTH_DIR" 2>/dev/null || true
+            if [ -f "$USER_TOR_DIR/torrc" ]; then
+                nohup tor -f "$USER_TOR_DIR/torrc" > "$USER_TOR_DIR/tor.log" 2>&1 &
+            else
+                nohup tor --DataDirectory "$USER_TOR_DIR" --SocksPort 9050 --ClientOnionAuthDir "$USER_AUTH_DIR" > "$USER_TOR_DIR/tor.log" 2>&1 &
+            fi
+        fi
+        for i in $(seq 1 12); do
             if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
                 echo -e "${GREEN}[+] Local Tor proxy is active.${NC}"
                 return 0
@@ -259,8 +267,17 @@ cmd_client_stop() {
     ensure_local_tor_active
 
     echo "[*] Sending stop signal to Phone Server over Tor..."
-    ssh -o ConnectTimeout=30 phone-server stop-server 2>/dev/null || true
-    echo "[+] Phone server daemons terminated successfully."
+    OUTPUT=$(ssh -o ConnectTimeout=30 phone-server stop-server 2>&1)
+    EXIT_CODE=$?
+
+    # stop-server terminates daemons and worker sessions; check for clean exit or server shutdown confirmation
+    if [ $EXIT_CODE -eq 0 ] || echo "$OUTPUT" | grep -q -i "stopped"; then
+        echo -e "${GREEN}[+] Phone server daemons terminated successfully.${NC}"
+    else
+        echo -e "${RED}[!] Failed to stop phone server over Tor (Exit code: $EXIT_CODE).${NC}"
+        [ -n "$OUTPUT" ] && echo -e "${YELLOW}SSH output:${NC}\n$OUTPUT"
+        return 1
+    fi
 }
 
 cmd_client_restart() {
@@ -272,7 +289,16 @@ cmd_client_restart() {
     ensure_local_tor_active
 
     echo "[*] Restarting Phone Server over Tor..."
-    ssh -o ConnectTimeout=30 phone-server restart-server "$@"
+    OUTPUT=$(ssh -o ConnectTimeout=30 phone-server restart-server "$@" 2>&1)
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ] || echo "$OUTPUT" | grep -q -i "active"; then
+        echo -e "${GREEN}[+] Phone server restarted successfully.${NC}"
+    else
+        echo -e "${RED}[!] Failed to restart phone server over Tor (Exit code: $EXIT_CODE).${NC}"
+        [ -n "$OUTPUT" ] && echo -e "${YELLOW}SSH output:${NC}\n$OUTPUT"
+        return 1
+    fi
 }
 
 # --- Server Implementation ---

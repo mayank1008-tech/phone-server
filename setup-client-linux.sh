@@ -148,25 +148,44 @@ CLEAN_ONION=$(echo "$INPUT_ONION" | sed 's/\.onion//' | tr -d ' \n\r')
 
 if [ -n "$CLEAN_ONION" ]; then
     AUTH_FILE_CONTENT="${CLEAN_ONION}:descriptor:x25519:${TOR_PRIV_KEY}"
-    echo "$AUTH_FILE_CONTENT" | run_sudo tee /var/lib/tor/onion_auth/phone.auth_private >/dev/null
-    run_sudo chmod 600 /var/lib/tor/onion_auth/phone.auth_private
     
-    # Auto-detect Tor daemon system user across Linux distributions
-    TOR_USER="debian-tor"
-    if id toranon >/dev/null 2>&1; then
-        TOR_USER="toranon"
-    elif id tor >/dev/null 2>&1; then
-        TOR_USER="tor"
-    elif id debian-tor >/dev/null 2>&1; then
+    # 1. User-level Tor configuration (dedicated fallback, no sudo required)
+    USER_TOR_DIR="$HOME/.local/share/tor"
+    USER_AUTH_DIR="$USER_TOR_DIR/onion_auth"
+    mkdir -p "$USER_AUTH_DIR"
+    chmod 700 "$USER_TOR_DIR" "$USER_AUTH_DIR"
+    echo "$AUTH_FILE_CONTENT" > "$USER_AUTH_DIR/phone.auth_private"
+    chmod 600 "$USER_AUTH_DIR/phone.auth_private"
+    cat << EOF_USER_TORRC > "$USER_TOR_DIR/torrc"
+DataDirectory $USER_TOR_DIR
+SocksPort 9050
+ClientOnionAuthDir $USER_AUTH_DIR
+EOF_USER_TORRC
+    chmod 600 "$USER_TOR_DIR/torrc"
+    echo -e "${GREEN}[+] Configured dedicated user Tor directory: $USER_TOR_DIR${NC}"
+
+    # 2. System-level Tor configuration (if systemd service exists & sudo is available)
+    if [ "$EUID" -eq 0 ] || sudo -n true 2>/dev/null || command -v sudo >/dev/null 2>&1; then
+        echo "$AUTH_FILE_CONTENT" | run_sudo tee /var/lib/tor/onion_auth/phone.auth_private >/dev/null 2>&1 || true
+        run_sudo chmod 600 /var/lib/tor/onion_auth/phone.auth_private 2>/dev/null || true
+        
+        # Auto-detect Tor daemon system user across Linux distributions
         TOR_USER="debian-tor"
+        if id toranon >/dev/null 2>&1; then
+            TOR_USER="toranon"
+        elif id tor >/dev/null 2>&1; then
+            TOR_USER="tor"
+        elif id debian-tor >/dev/null 2>&1; then
+            TOR_USER="debian-tor"
+        fi
+        run_sudo chown -R ${TOR_USER}:${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || run_sudo chown -R ${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || true
+        echo -e "${GREEN}[+] Saved private authorization key to /var/lib/tor/onion_auth/phone.auth_private (Owner: $TOR_USER)${NC}"
+        
+        # Enable and restart Tor service
+        echo -e "${BLUE}[*] Restarting system Tor service...${NC}"
+        run_sudo systemctl enable tor tor@default 2>/dev/null || true
+        run_sudo systemctl restart tor tor@default 2>/dev/null || run_sudo service tor restart 2>/dev/null || true
     fi
-    run_sudo chown -R ${TOR_USER}:${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || run_sudo chown -R ${TOR_USER} /var/lib/tor/onion_auth 2>/dev/null || true
-    echo -e "${GREEN}[+] Saved private authorization key to /var/lib/tor/onion_auth/phone.auth_private (Owner: $TOR_USER)${NC}"
-    
-    # Enable and restart Tor service
-    echo -e "${BLUE}[*] Restarting system Tor service...${NC}"
-    run_sudo systemctl enable tor tor@default 2>/dev/null || true
-    run_sudo systemctl restart tor tor@default 2>/dev/null || run_sudo service tor restart 2>/dev/null || true
 else
     echo -e "${YELLOW}[!] Skipped onion address mapping. You can add it later to /var/lib/tor/onion_auth/phone.auth_private${NC}"
 fi

@@ -41,13 +41,13 @@ This guide is written for **everyone**—from curious beginners setting up their
    - [EDR-12: Context-Aware Remote Cycling (`[ -n "$SSH_CONNECTION" ]`) vs. Monolithic Process Kill](#edr-12-context-aware-remote-cycling-vs-monolithic-process-kill)
    - [EDR-13: PTY-Filtered Session Counting (`/dev/pts/`) vs. TCP Socket Counting](#edr-13-pty-filtered-session-counting-devpts-vs-tcp-socket-counting)
    - [EDR-14: 100% Non-Root Android Compatibility vs. Magisk Root Enforcement](#edr-14-100-non-root-android-compatibility-vs-magisk-root-enforcement)
-   - [EDR-15: Mobile Carrier NAT Keepalive Tuning (`KeepalivePeriod 30`, `ConnectionPadding 1`)](#edr-15-mobile-carrier-nat-keepalive-tuning)
+   - [EDR-15: Mobile Carrier NAT Keepalive & Traffic Analysis Resistance Tuning](#edr-15-mobile-carrier-nat-keepalive--traffic-analysis-resistance-tuning)
 5. [The Real-World Production War Stories](#5-the-real-world-production-war-stories)
    - [War Story 1: The Dynamic IP / Wi-Fi Roaming Black Hole](#war-story-1-the-dynamic-ip--wi-fi-roaming-black-hole)
    - [War Story 2: The Tor Descriptor Upload Rate-Limit Lockout (`state` file)](#war-story-2-the-tor-descriptor-upload-rate-limit-lockout-state-file)
    - [War Story 3: The Android Toybox `pgrep` Trap](#war-story-3-the-android-toybox-pgrep-trap)
    - [War Story 4: The Remote SSH Session Suicide](#war-story-4-the-remote-ssh-session-suicide)
-   - [War Story 5: The 30–45s Global DHT Propagation Delay](#war-story-5-the-3045s-global-dht-propagation-delay)
+   - [War Story 5: The Initial HSDir Descriptor Propagation Window](#war-story-5-the-initial-hsdir-descriptor-propagation-window)
 6. [Future Flexibility & Extensibility](#6-future-flexibility--extensibility)
    - [Adding Multiple Devices Seamlessly](#adding-multiple-devices-seamlessly)
    - [Client Key Revocation & Compromise Recovery](#client-key-revocation--compromise-recovery)
@@ -89,8 +89,8 @@ To visualize how our security works, picture a secret underground VIP vault:
 |                                                                               |
 |   1. The Invisible Safe (Server Phone):                                       |
 |      - Buried underground with NO doors, windows, or signs on the street.     |
-|      - Posts an encrypted note in a public locker (Tor DHT) that can          |
-|        ONLY be deciphered if you have a special cryptographic lens.           |
+|      - Posts an encrypted note in a public locker (Tor HSDir Directory) that   |
+|        can ONLY be deciphered if you have a special cryptographic lens.        |
 |                                                                               |
 |   2. The Client (Laptop / Second Phone):                                      |
 |      - Gate 1: You use your Lens (X25519 Tor Private Key) to read the secret  |
@@ -101,7 +101,7 @@ To visualize how our security works, picture a secret underground VIP vault:
 +-------------------------------------------------------------------------------+
 ```
 
-If a hacker, botnet, or network snooper scans your phone's onion address without your **Gate 1** key, Tor immediately replies `Host unreachable`. Zero network packets ever reach your phone!
+If an unauthorized party scans or attempts to connect to your phone's onion address without your **Gate 1** key, Tor immediately replies `Host unreachable` at the HSDir layer without establishing a circuit to the phone. Zero unauthorized connections reach your Termux daemon!
 
 ---
 
@@ -153,15 +153,15 @@ sequenceDiagram
     actor Dev as Developer (Laptop Client)
     participant SSH as OpenSSH Client
     participant LTor as Client Tor Proxy (127.0.0.1:9050)
-    participant DHT as Global Tor DHT (HSDir Authorities)
+    participant HSDir as Tor HSDir Directory Relays
     participant RP as Tor Rendezvous Point
     participant STor as Phone Tor Daemon
     participant SSHD as Phone OpenSSH (Port 8022)
 
     Dev->>SSH: Run "phone-server connect" (or "ssh phone-server")
     SSH->>LTor: ProxyCommand: Route *.onion via SOCKS5:9050
-    LTor->>DHT: Request Hidden Service Descriptor for *.onion
-    DHT-->>LTor: Return ENCRYPTED descriptor blob
+    LTor->>HSDir: Request Hidden Service Descriptor for *.onion
+    HSDir-->>LTor: Return ENCRYPTED descriptor blob
     Note over LTor: Decrypts descriptor using client's private X25519 key.<br/>Learns phone's Introduction Points!
     LTor->>RP: Client builds 3-hop circuit to chosen Rendezvous Point
     LTor->>STor: Send rendezvous cookie via Introduction Point
@@ -256,33 +256,61 @@ fi
 - **Why `/dev/tcp/` + `pidof`**: On Android Termux, SELinux sometimes hides processes from `ps` or Toybox `pgrep`. Probing bash's built-in `/dev/tcp/127.0.0.1/8022` directly verifies whether the TCP port is listening regardless of process table permissions.
 
 #### 4. The 8-Second Watchdog (`watchdog-server`)
-Located in [`setup-server-termux.sh`](file:///home/mayank-jain/stealth-tor-phone-server/setup-server-termux.sh#L366-L415):
+Located in [`setup-server-termux.sh`](file:///home/mayank-jain/stealth-tor-phone-server/setup-server-termux.sh):
 ```bash
 get_current_ips() {
-    ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | sort | tr '\n' ' '
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | sort | tr '\n' ' '
+    else
+        ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | sort | tr '\n' ' '
+    fi
 }
 LAST_IPS=$(get_current_ips)
+LAST_SIGHUP=0
 
 while true; do
     sleep 8
-    # 1. Ensure sshd is running
-    if ! pidof sshd >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+
+    # 1. Process supervision: ensure sshd is running
+    SSHD_RUNNING=0
+    if [ -f "$PREFIX/var/run/sshd.pid" ]; then
+        SSHD_PID=$(cat "$PREFIX/var/run/sshd.pid" 2>/dev/null)
+        [ -n "$SSHD_PID" ] && kill -0 "$SSHD_PID" 2>/dev/null && SSHD_RUNNING=1
+    fi
+    if [ "$SSHD_RUNNING" -ne 1 ] && ! (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1; then
+        rm -f "$PREFIX/var/run/sshd.pid" 2>/dev/null || true
         $PREFIX/bin/sshd >/dev/null 2>&1 || true
     fi
-    # 2. Ensure Tor is running
-    if ! pidof tor >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
-        rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
-        nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+
+    # 2. Process supervision: ensure Tor is running with valid configuration
+    TOR_RUNNING=0
+    if [ -f "$PREFIX/var/run/tor.pid" ]; then
+        TOR_PID=$(cat "$PREFIX/var/run/tor.pid" 2>/dev/null)
+        [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null && TOR_RUNNING=1
+    fi
+    if [ "$TOR_RUNNING" -ne 1 ] && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+        rm -f "$PREFIX/var/run/tor.pid" 2>/dev/null || true
+        if "$PREFIX/bin/tor" --verify-config -f "$PREFIX/etc/tor/torrc" >/dev/null 2>&1; then
+            nohup "$PREFIX/bin/tor" -f "$PREFIX/etc/tor/torrc" > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+        fi
         LAST_IPS=$(get_current_ips)
         termux-wake-lock 2>/dev/null || true
         continue
     fi
-    # 3. Dynamic IP / Network Interface Change Detection
+
+    # 3. Dynamic IP / Network Interface Change Detection (Wi-Fi <-> Cellular)
     CURRENT_IPS=$(get_current_ips)
     if [ -n "$CURRENT_IPS" ] && [ "$CURRENT_IPS" != "$LAST_IPS" ]; then
-        LAST_IPS="$CURRENT_IPS"
-        pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
-        termux-wake-lock 2>/dev/null || true
+        NOW=$(date +%s)
+        # Bounded debounce: Do not signal SIGHUP more frequently than once every 20 seconds
+        if [ $((NOW - LAST_SIGHUP)) -ge 20 ]; then
+            LAST_IPS="$CURRENT_IPS"
+            LAST_SIGHUP="$NOW"
+            pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
+            termux-wake-lock 2>/dev/null || true
+        else
+            LAST_IPS="$CURRENT_IPS"
+        fi
     fi
 done
 ```
@@ -382,29 +410,29 @@ Every major architectural choice in this repository was evaluated against altern
 * **Decision**: **Preserve the `state` file by default on normal starts and restarts.** Provide an explicit recovery tool (`reset-tor-state` / `phone-server repair-tor`) to purge state only when an operational rate-limit lock occurs.
 * **Rationale**:
   - Automatically deleting `state` on every startup forces Tor to choose fresh Entry Guards every time, which weakens long-term anonymity against Sybil/traffic analysis attacks.
-  - Preserving `state` protects guard node stability and DHT routing performance.
+  - Preserving `state` protects guard node stability and circuit building performance.
   - When a manual reset is needed, `reset-tor-state` gives developers a clear, documented recovery path without compromising standard security.
 
 ---
 
 ### EDR-11: OpenSSH Connection Multiplexing (`ControlMaster`) vs. Raw Cold Tor Circuits
-* **Context**: Tor circuits take 3 to 8 seconds to build from cold start, making frequent command execution or opening new terminal tabs sluggish.
+* **Context**: Tor circuits take several seconds to build from a cold start, making frequent command execution or opening new terminal tabs sluggish.
 * **Decision**: Configure OpenSSH client multiplexing in `~/.ssh/config`:
   ```ssh-config
   ControlMaster auto
   ControlPath ~/.ssh/control-%C
   ControlPersist 10m
   ```
-* **Rationale**: The first connection pays the one-time 3-second Tor handshake fee. Subsequent SSH sessions, scp file transfers, and status checks reuse the established tunnel through the UNIX domain socket in **less than 100ms** ($<0.1\text{s}$).
+* **Rationale**: The first connection establishes the multi-hop Tor rendezvous circuit (measured at ~5–15s under typical 4G LTE/Wi-Fi conditions). Subsequent SSH sessions, scp file transfers, and status checks reuse the established tunnel through the UNIX domain socket with sub-second execution (~50–200ms observed latency depending on relay paths).
 
 ---
 
 ### EDR-12: Context-Aware Remote Cycling (`[ -n "$SSH_CONNECTION" ]`) vs. Monolithic Process Kill
 * **Context**: When executing `restart-server` over a remote SSH session, a standard `killall -9 sshd-session` kills the active shell before `start-server` can execute, leaving the server permanently dead.
 * **Decision**: Inspect `$SSH_CONNECTION` and `$SSH_CLIENT`:
-  - If running over remote SSH: Kill only the master listener (`pkill -x sshd`) and Tor daemon, purge state, and start services. Do not terminate the active worker session.
+  - If running over remote SSH: Kill only the master listener (`pkill -x sshd`) and Tor daemon, preserving the Tor state file to maintain established Entry Guards, and restart services. Do not terminate the active worker session.
   - If running locally in Termux: Perform full teardown.
-* **Rationale**: Guarantees remote administrative commands never result in self-inflicted server lockouts.
+* **Rationale**: Guarantees remote administrative commands never result in self-inflicted server lockouts, while ensuring Entry Guard stability is preserved across routine maintenance restarts.
 
 ---
 
@@ -422,12 +450,12 @@ Every major architectural choice in this repository was evaluated against altern
 
 ---
 
-### EDR-15: Mobile Carrier NAT Keepalive Tuning
-* **Context**: Cellular carriers aggressively prune idle TCP connection states from their NAT gateway tables after 30 to 60 seconds of inactivity.
-* **Decision**: Configure both Tor and OpenSSH keepalives:
-  - In `torrc`: `KeepalivePeriod 30`, `ConnectionPadding 1`, `ReducedConnectionPadding 0`.
+### EDR-15: Mobile Carrier NAT Keepalive & Traffic Analysis Resistance Tuning
+* **Context**: Cellular carriers aggressively prune idle TCP connection states from their NAT gateway tables after 30 to 60 seconds of inactivity, while mobile traffic is vulnerable to timing analysis.
+* **Decision**: Separate keepalive signaling from traffic padding:
+  - In `torrc`: `KeepalivePeriod 30` (transmits lightweight cell heartbeats to prevent carrier NAT tables from dropping idle rendezvous circuits), `ConnectionPadding 1` (adds padding cells to resist side-channel traffic analysis and packet length profiling), and `ReducedConnectionPadding 0`.
   - In `~/.ssh/config`: `ServerAliveInterval 15`, `ServerAliveCountMax 3`.
-* **Rationale**: Periodic encrypted keepalive cells prevent carrier middleboxes from dropping idle NAT states, keeping the 6-hop tunnel stable 24/7.
+* **Rationale**: Transport-level keepalives keep carrier middlebox NAT state tables open, while cryptographic connection padding mitigates ISP traffic inspection.
 
 ---
 
@@ -440,14 +468,14 @@ During real-world development and testing across Samsung Galaxy and Xiaomi/POCO 
 ### War Story 1: The Dynamic IP / Wi-Fi Roaming Black Hole
 * **Symptom**: Laptop and client phone were suddenly unable to connect (`nc: connection failed, SOCKSv5 error: Host unreachable`).
 * **Root Cause**: The server phone transitioned from Wi-Fi (`192.168.0.100`) to mobile data. Tor's outbound sockets to its Introduction Points were black-holed. Because no TCP `RST` was received, Tor waited for socket timeouts (several minutes) before attempting reconnection.
-* **Permanent Fix**: Implemented `watchdog-server` which samples `ifconfig` every 8 seconds. When an IP change is detected, it sends `SIGHUP` to Tor, triggering an instant rebuild of introduction point circuits on the new interface in 10–15 seconds.
+* **Permanent Fix**: Implemented `watchdog-server` which samples IP addresses using `ip -4 addr` (with `ifconfig` fallback) every 8 seconds, enforcing a 20-second debounce timer to prevent reload storms during rapid interface flapping. When an IP shift is detected, it signals Tor via `SIGHUP`, initiating circuit reconstruction on the active network interface.
 
 ---
 
 ### War Story 2: The Tor Descriptor Upload Rate-Limit Lockout (`state` file)
 * **Symptom**: After restarting services during testing, connections consistently timed out for over an hour.
 * **Root Cause**: Rapid restarts triggered Tor's internal anti-DDoS upload limiter (`hs_service.c`). Tor saved a rate-limit timestamp to `$PREFIX/var/lib/tor/state` locking descriptor uploads for 90 minutes into the future. Even killing and restarting Tor read the lock from disk.
-* **Permanent Fix**: Added automated removal of transient state files (`rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state"`) in both `start-server` and `restart-server`, resetting the backoff timer to 0 on every launch.
+* **Production Architecture Evolution**: In early prototypes, we wiped `$PREFIX/var/lib/tor/state` on every startup. However, rigorous architectural review confirmed this violated Tor guard persistence guidelines, resetting Entry Guards and degrading anonymity and connection stability. In the production architecture, Tor's state is preserved during all standard operational restarts. To address rare descriptor upload rate-limit lockouts, we introduced `phone-server repair-tor` (and `$PREFIX/bin/reset-tor-state`) as an explicit, intentional diagnostic recovery command.
 
 ---
 
@@ -465,10 +493,10 @@ During real-world development and testing across Samsung Galaxy and Xiaomi/POCO 
 
 ---
 
-### War Story 5: The 30–45s Global DHT Propagation Delay
+### War Story 5: The Initial HSDir Descriptor Propagation Window
 * **Symptom**: Immediate connection attempts right after launching the server failed with `Connection timed out during banner exchange`.
-* **Root Cause**: Global Tor Hidden Service Directory (HSDir) authorities require 30–45 seconds to synchronize newly published v3 descriptors across the global decentralized network.
-* **Permanent Fix**: Integrated clear progress feedback into the CLI and status tools, notifying users of the one-time 30–45s DHT propagation window on fresh starts.
+* **Root Cause**: When an onion service descriptor is newly published, assigned HSDir (Hidden Service Directory) relays in the consensus require time (observed at ~30–60 seconds in mobile testing) to receive, store, and index the encrypted descriptor across the decentralized network.
+* **Permanent Fix**: Integrated clear progress feedback into the CLI and status tools, notifying users of the initial HSDir propagation window on fresh starts.
 
 ---
 
