@@ -21,3 +21,8 @@ client_public_keys.txt
 tor_data/
 hidden_ssh/
 onion_auth/
+
+# Personal Local Notes & Non-Project Files
+TERMUX_SAMSUNG_AGENT_PITFALLS.md
+AI_AGENT_SAMSUNG_TERMUX_GUIDE.md
+*.local.md
