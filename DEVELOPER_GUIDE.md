@@ -36,7 +36,7 @@ This guide is written for **everyone**—from curious beginners setting up their
    - [EDR-07: `netcat-openbsd` ProxyCommand vs. `socat` / `connect-proxy`](#edr-07-netcat-openbsd-proxycommand-vs-socat--connect-proxy)
    - [EDR-08: Process Supervision via `pidof` + Native Bash `/dev/tcp/` vs. Toybox `pgrep`](#edr-08-process-supervision-via-pidof--native-bash-devtcp-vs-toybox-pgrep)
    - [EDR-09: Background Watchdog with Tor `SIGHUP` vs. Polling / Port Rebind / Systemd / Cron](#edr-09-background-watchdog-with-tor-sighup-vs-polling--port-rebind--systemd--cron)
-   - [EDR-10: Tor Startup State Purging (`rm state`) vs. DHT Backoff Timeout Waiting](#edr-10-tor-startup-state-purging-rm-state-vs-dht-backoff-timeout-waiting)
+   - [EDR-10: Tor State File Preservation vs. Aggressive State Wiping (Guards & Anonymity Stability)](#edr-10-tor-state-file-preservation-vs-aggressive-state-wiping-guards--anonymity-stability)
    - [EDR-11: OpenSSH Connection Multiplexing (`ControlMaster`) vs. Raw Cold Tor Circuits](#edr-11-openssh-connection-multiplexing-controlmaster-vs-raw-cold-tor-circuits)
    - [EDR-12: Context-Aware Remote Cycling (`[ -n "$SSH_CONNECTION" ]`) vs. Monolithic Process Kill](#edr-12-context-aware-remote-cycling-vs-monolithic-process-kill)
    - [EDR-13: PTY-Filtered Session Counting (`/dev/pts/`) vs. TCP Socket Counting](#edr-13-pty-filtered-session-counting-devpts-vs-tcp-socket-counting)
@@ -50,6 +50,10 @@ This guide is written for **everyone**—from curious beginners setting up their
    - [War Story 5: The 30–45s Global DHT Propagation Delay](#war-story-5-the-3045s-global-dht-propagation-delay)
 6. [Future Flexibility & Extensibility](#6-future-flexibility--extensibility)
    - [Adding Multiple Devices Seamlessly](#adding-multiple-devices-seamlessly)
+   - [Client Key Revocation & Compromise Recovery](#client-key-revocation--compromise-recovery)
+   - [Host-Key Pinning & Trust on First Use (TOFU)](#host-key-pinning--trust-on-first-use-tofu)
+   - [Backup & Disaster Recovery Procedure](#backup--disaster-recovery-procedure)
+   - [Mobile NAT Keepalive & Traffic Tuning](#mobile-nat-keepalive--traffic-tuning)
    - [Hosting Any Service (Web Servers, APIs, Databases, Git)](#hosting-any-service-web-servers-apis-databases-git)
    - [Global Network Agnosticism](#global-network-agnosticism)
 7. [Codebase Architecture & File-by-File Analysis](#7-codebase-architecture--file-by-file-analysis)
@@ -299,15 +303,15 @@ Every major architectural choice in this repository was evaluated against altern
   2. *Tailscale / ZeroTier*: Requires third-party company accounts (Google/GitHub SSO), proprietary control-plane servers, and device discovery metadata resides with a corporation.
   3. *Cloudflare Tunnels*: Requires owning a custom public domain name and trusting Cloudflare with TLS termination keys.
   4. *Ngrok*: Rate-limited, requires account verification, proxies unencrypted payloads.
-  5. *Tor v3 Hidden Services*: 100% decentralized, zero accounts, zero open ports, 6-hop encrypted tunnel meeting at neutral Rendezvous Points.
-* **Decision**: **Tor v3 Hidden Services**. Access is anchored entirely in mathematics. Zero third-party dependency.
+  5. *Tor v3 Hidden Services*: Decentralized, zero proprietary accounts, zero open router ports, 6-hop encrypted tunnel meeting at neutral Rendezvous Points.
+* **Decision**: **Tor v3 Hidden Services**. Access is anchored entirely in asymmetric cryptography. Zero reliance on centralized SaaS coordination servers.
 
 ---
 
 ### EDR-02: Tor v3 Stealth Mode (X25519) vs. Public Hidden Services
-* **Context**: Standard Tor onion addresses are published unencrypted to distributed directory authorities (HSDir nodes). Malicious nodes harvest these addresses and port-scan them 24/7.
+* **Context**: Standard Tor onion addresses publish unencrypted descriptors to distributed directory infrastructure (HSDir nodes). Malicious nodes harvest these addresses and port-scan them 24/7.
 * **Decision**: **Enforce Tor v3 Client Authorization (Stealth Mode)** via Curve25519 (`x25519`).
-* **Rationale**: The hidden service descriptor is strongly encrypted with the client's public key before publishing. Unauthorized crawlers cannot decipher the descriptor, cannot locate introduction points, and receive `Host unreachable` at the DHT level. Zero unauthorized packets reach the phone's battery and radio.
+* **Rationale**: The hidden service descriptor is strongly encrypted with the client's public key before publishing. Unauthorized parties cannot decipher the descriptor or discover Introduction Points, and are rejected at the Tor rendezvous layer before ever reaching the OpenSSH daemon. No inbound ports are exposed to the public internet.
 
 ---
 
@@ -318,7 +322,7 @@ Every major architectural choice in this repository was evaluated against altern
   - Ed25519 provides ~128 bits of security (equivalent to 3072-bit RSA) in a tiny 68-character public key.
   - Immune to cache-timing and side-channel attacks.
   - Short key length avoids copy-paste truncation errors on mobile screens.
-  - OpenSSH 9.8+ process splitting decouples the listener (`sshd`) from authenticated workers (`sshd-session`), preventing CVE-2024-6387 regreSSHion vulnerabilities.
+  - OpenSSH 9.8+ splits connection handling into dedicated `sshd-session` child processes and eliminates async signal handler race conditions, protecting against CVE-2024-6387 (regreSSHion).
 
 ---
 
@@ -361,21 +365,25 @@ Every major architectural choice in this repository was evaluated against altern
 
 ---
 
-### EDR-09: Background Watchdog with Tor `SIGHUP` vs. Polling / Port Rebind / Systemd / Cron
+### EDR-09: Background Watchdog with Debounced Tor SIGHUP & Multi-Tool IP Sampling
 * **Context**: When the phone roams between Wi-Fi and mobile data (or DHCP renews), the phone's IP address changes. Remote Tor Introduction Points black-hole packets sent to the old IP.
-* **Decision**: Create an 8-second background loop (`watchdog-server`) that detects IP churn and signals Tor with `killall -HUP tor`.
+* **Decision**: Create an 8-second background loop (`watchdog-server`) with multi-tool IP sampling (`ip addr` + `ifconfig`) and a 20-second debounce timer that signals Tor via `pkill -HUP -x tor`.
 * **Rationale**:
   - `cron` is not installed by default in Termux and has a minimum interval of 1 minute (too slow).
   - Termux lacks `systemd`.
-  - Killing and restarting Tor causes a 45-second downtime.
+  - Killing and restarting Tor causes a 30–45s downtime and resets circuits.
   - Sending `SIGHUP` instructs Tor's event loop to tear down stale socket file descriptors and build new introduction point circuits over the new interface within 10–15 seconds without restarting the daemon.
+  - The 20-second debounce timer prevents CPU and circuit flapping if Wi-Fi signal fluctuates repeatedly.
 
 ---
 
-### EDR-10: Tor Startup State Purging (`rm state`) vs. DHT Backoff Timeout Waiting
-* **Context**: Rapid restarts or unclean terminations trigger Tor's internal descriptor rate-limiter, which writes a lockout timestamp to `$PREFIX/var/lib/tor/state`, blocking descriptor uploads for up to 90 minutes.
-* **Decision**: Automatically purge `$PREFIX/var/lib/tor/state` and `/tmp/state` in `start-server` and `restart-server`.
-* **Rationale**: The state file only stores cached rate-limit backoff timers and guard node lifetime statistics. Purging it on daemon startup resets the rate-limit penalty back to zero, allowing immediate descriptor publication without compromising cryptographic keys (which are stored safely in `hidden_ssh/`).
+### EDR-10: Tor State File Preservation as Default, Manual State Purge as Diagnostic Recovery
+* **Context**: Tor persists Entry Guard nodes and guard lifetime statistics in its `state` file (`$PREFIX/var/lib/tor/state`). However, rapid restarts during debugging can trigger Tor's internal descriptor rate-limiter, writing a lockout timestamp that delays descriptor uploads.
+* **Decision**: **Preserve the `state` file by default on normal starts and restarts.** Provide an explicit recovery tool (`reset-tor-state` / `phone-server repair-tor`) to purge state only when an operational rate-limit lock occurs.
+* **Rationale**:
+  - Automatically deleting `state` on every startup forces Tor to choose fresh Entry Guards every time, which weakens long-term anonymity against Sybil/traffic analysis attacks.
+  - Preserving `state` protects guard node stability and DHT routing performance.
+  - When a manual reset is needed, `reset-tor-state` gives developers a clear, documented recovery path without compromising standard security.
 
 ---
 
@@ -479,6 +487,49 @@ You can authorize your laptop, a work desktop, a secondary phone, and a friend's
    authorize-client "workstation" "<TOR_PUB>" "<SSH_PUB>"
    ```
 4. Tor reloads its authorization list instantly with `killall -HUP tor`. The new device has immediate access; existing connections are never dropped.
+
+### Client Key Revocation & Compromise Recovery
+If a client laptop or secondary device is lost, stolen, or decommissioned, its access can be revoked immediately:
+```bash
+# On the phone server via phone-server CLI:
+phone-server revoke <client_name>
+
+# Or directly via binary:
+authorize-client --revoke <client_name>
+```
+**Under the Hood**:
+1. Deletes `$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/<client_name>.auth`.
+2. Validates Tor configuration integrity (`tor --verify-config`).
+3. Sends `SIGHUP` to Tor (`pkill -HUP -x tor`).
+4. Tor immediately generates a new descriptor salt, signs a fresh descriptor without that client's descriptor cookie, and re-publishes to the HSDir network.
+5. The revoked client's cached credentials can no longer decrypt new descriptors. Even if the attacker knows the exact `.onion` address and possesses the SSH key, they cannot locate the rendezvous points.
+
+### Host-Key Pinning & Trust on First Use (TOFU)
+To ensure clients always talk to the authentic server and prevent man-in-the-middle attacks or identity spoofing:
+* When a client connects for the first time, OpenSSH validates the server's Ed25519 host key and prompts the user to accept it, pinning it into `~/.ssh/known_hosts`.
+* If any entity attempts to intercept or impersonate the phone server, OpenSSH aborts the connection with a `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`.
+* You can inspect your server phone's exact host key fingerprint anytime on the phone:
+  ```bash
+  ssh-keygen -lf $PREFIX/etc/ssh/ssh_host_ed25519_key.pub
+  ```
+
+### Backup & Disaster Recovery Procedure
+To ensure you can restore your phone server seamlessly if you replace the phone or factory reset:
+1. **Back up Tor Hidden Service Identity (keeps your permanent .onion address)**:
+   - Secret key: `$PREFIX/var/lib/tor/hidden_ssh/hs_ed25519_secret_key`
+   - Public hostname: `$PREFIX/var/lib/tor/hidden_ssh/hostname`
+2. **Back up SSH Host Keys (prevents known_hosts fingerprint mismatch)**:
+   - Directory: `$PREFIX/etc/ssh/ssh_host_*`
+3. **Back up Authorized Client Keys**:
+   - Directory: `$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/`
+   - File: `$HOME/.ssh/authorized_keys`
+Store this backup archive in an encrypted offline container (e.g. `tar -czf phone_backup.tar.gz ... && gpg -c phone_backup.tar.gz`). Restoring these files to a fresh Termux installation resurrects the exact same `.onion` address and client authorizations without requiring re-configuration of any client devices.
+
+### Mobile NAT Keepalive & Traffic Tuning
+Mobile cellular carriers (CGNAT) enforce aggressive TCP state timeouts (often 30–60 seconds). To maintain live outbound rendezvous circuits without burning excessive mobile data or battery:
+* `KeepalivePeriod 30`: Sends lightweight Tor cells every 30 seconds over open rendezvous circuits to keep cellular NAT mapping tables open.
+* `ConnectionPadding 1`: Enables Tor connection padding to defeat side-channel traffic analysis.
+* `ReducedConnectionPadding 0`: Provides regular padding cells; for battery-critical scenarios on metered 2G/3G connections, developers can toggle `ReducedConnectionPadding 1` to halve keepalive overhead.
 
 ### Hosting Any Service (Web Servers, APIs, Databases, Git)
 Because you have a full Linux shell inside Termux, your phone server can host almost anything:

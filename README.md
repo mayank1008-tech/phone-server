@@ -346,6 +346,8 @@ phone-server --help
 | **Server** | `phone-server restart` | Cleanly terminates and relaunches daemons on phone. |
 | **Server** | `phone-server status` | Queries local PIDs, sockets, active shells, and battery. |
 | **Server** | `phone-server authorize [name]` | Registers a new client device on server. |
+| **Server** | `phone-server revoke [name]` | Revokes authorization for a client device. |
+| **Server** | `phone-server repair-tor` | Resets Tor state file if descriptor uploads are rate-limited. |
 | **Server** | `phone-server setup server` | Runs full server installer on Android Termux. |
 
 ---

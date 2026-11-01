@@ -93,21 +93,24 @@ mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
 chmod 700 "$PREFIX/var/lib/tor/hidden_ssh"
 chmod 700 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
 
-# Clean up existing hidden_ssh block if re-running
+# Clean up existing tagged phone-server block atomically if re-running
 if [ -f "$PREFIX/etc/tor/torrc" ]; then
-    grep -v "hidden_ssh" "$PREFIX/etc/tor/torrc" > "$PREFIX/etc/tor/torrc.bak" || true
-    mv "$PREFIX/etc/tor/torrc.bak" "$PREFIX/etc/tor/torrc"
+    sed -i '/# --- START STEALTH TOR PHONE SERVER CONFIG ---/,/# --- END STEALTH TOR PHONE SERVER CONFIG ---/d' "$PREFIX/etc/tor/torrc" 2>/dev/null || true
+    # Also strip legacy untagged entries
+    sed -i '/HiddenServiceDir.*hidden_ssh/d; /HiddenServicePort.*8022/d; /KeepalivePeriod/d; /ConnectionPadding/d; /ReducedConnectionPadding/d' "$PREFIX/etc/tor/torrc" 2>/dev/null || true
 fi
 
 cat << EOF >> "$PREFIX/etc/tor/torrc"
+# --- START STEALTH TOR PHONE SERVER CONFIG ---
 # Stealth Tor v3 Onion Service for SSH
 HiddenServiceDir $PREFIX/var/lib/tor/hidden_ssh/
 HiddenServicePort 8022 127.0.0.1:8022
 
-# Mobile Dynamic IP & NAT Keepalive Tuning (Pillars 1 & 2)
+# Mobile Dynamic IP & NAT Keepalive Tuning
 KeepalivePeriod 30
 ConnectionPadding 1
 ReducedConnectionPadding 0
+# --- END STEALTH TOR PHONE SERVER CONFIG ---
 EOF
 
 # 6. Install Server Control Executables into $PREFIX/bin/
@@ -127,9 +130,6 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 # Ensure host keys exist
 ssh-keygen -A >/dev/null 2>&1 || true
 
-# Clear any stale Tor descriptor backoff/rate-limit state from previous crashes
-rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
-
 # Start sshd if not already listening
 if (echo > /dev/tcp/127.0.0.1/8022) >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1; then
     echo "[*] OpenSSH daemon is already running (port 8022)."
@@ -142,8 +142,12 @@ fi
 if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1 || pidof tor >/dev/null 2>&1; then
     echo "[*] Tor daemon is already running (port 9050)."
 else
-    nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
-    echo "[+] Tor daemon started in background."
+    if ! $PREFIX/bin/tor --verify-config >/dev/null 2>&1; then
+        echo "[!] Error: tor --verify-config reported invalid configuration. Tor was NOT started."
+    else
+        nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
+        echo "[+] Tor daemon started in background."
+    fi
 fi
 
 # Ensure Termux wakelock is active
@@ -287,12 +291,10 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
     pkill -x tor 2>/dev/null || true
     pkill -x sshd 2>/dev/null || true
-    rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
     sleep 1
     $PREFIX/bin/start-server
 else
     $PREFIX/bin/stop-server
-    rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
     sleep 1
     $PREFIX/bin/start-server
 fi
@@ -302,10 +304,37 @@ EOF
 cat << 'EOF' > "$PREFIX/bin/authorize-client"
 #!/data/data/com.termux/files/usr/bin/bash
 # ==============================================================================
-# Authorize a New Client Device (Phone Server)
+# Authorize or Revoke a Client Device (Phone Server)
 # ==============================================================================
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME=/data/data/com.termux/files/home
+AUTH_DIR="$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
+mkdir -p "$AUTH_DIR" "$HOME/.ssh" 2>/dev/null || true
+
+# Handle Client Revocation
+if [ "$1" == "--revoke" ] || [ "$1" == "revoke" ] || [ "$1" == "-r" ]; then
+    REVOKE_NAME="$2"
+    if [ -z "$REVOKE_NAME" ]; then
+        read -p "Enter label of client to revoke: " REVOKE_NAME
+    fi
+    REVOKE_NAME=$(echo "$REVOKE_NAME" | tr -cd 'a-zA-Z0-9_-')
+    if [ -z "$REVOKE_NAME" ]; then
+        echo "[!] Error: Invalid client name for revocation."
+        exit 1
+    fi
+    TARGET_AUTH="$AUTH_DIR/${REVOKE_NAME}.auth"
+    if [ -f "$TARGET_AUTH" ]; then
+        rm -f "$TARGET_AUTH"
+        if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config >/dev/null 2>&1; then
+            echo "[!] Warning: tor --verify-config failed after removing authorization file."
+        fi
+        pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
+        echo "[+] Client '$REVOKE_NAME' authorization file removed and Tor reloaded."
+    else
+        echo "[-] Client authorization '$TARGET_AUTH' not found."
+    fi
+    exit 0
+fi
 
 CLIENT_NAME="$1"
 TOR_PUB="$2"
@@ -316,7 +345,7 @@ if [ -z "$CLIENT_NAME" ]; then
     CLIENT_NAME=${CLIENT_NAME:-client}
 fi
 
-# Sanitize client name for safe filenames (alphanumeric, underscore, dash)
+# Sanitize client name for safe filenames (alphanumeric, underscore, dash only)
 CLIENT_NAME=$(echo "$CLIENT_NAME" | tr ' ' '_' | tr -cd 'a-zA-Z0-9_-')
 CLIENT_NAME=${CLIENT_NAME:-client}
 
@@ -334,15 +363,26 @@ CLEAN_SSH=$(echo "$SSH_PUB" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:s
 KEYS_ADDED=0
 
 if [ -n "$CLEAN_PUB" ]; then
-    mkdir -p "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients"
-    echo "descriptor:x25519:$CLEAN_PUB" > "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
-    chmod 600 "$PREFIX/var/lib/tor/hidden_ssh/authorized_clients/${CLIENT_NAME}.auth"
+    # Strict validation: RFC 4648 unpadded Base32 (32-byte key is 52 or 56 chars of A-Z, 2-7)
+    if ! echo "$CLEAN_PUB" | grep -E -q '^[a-zA-Z2-7]{52,56}$'; then
+        echo "[!] Error: Invalid Tor X25519 public key format. Expected 52-56 Base32 characters [a-z, 2-7]."
+        exit 1
+    fi
+    # Atomic file write via temporary file
+    TMP_AUTH="$AUTH_DIR/${CLIENT_NAME}.auth.tmp"
+    echo "descriptor:x25519:$CLEAN_PUB" > "$TMP_AUTH"
+    chmod 600 "$TMP_AUTH"
+    mv -f "$TMP_AUTH" "$AUTH_DIR/${CLIENT_NAME}.auth"
     echo "[+] Tor authorization registered: ${CLIENT_NAME}.auth"
     KEYS_ADDED=1
 fi
 
 if [ -n "$CLEAN_SSH" ]; then
-    mkdir -p "$HOME/.ssh"
+    # Strict validation: Ed25519 public key format check
+    if ! echo "$CLEAN_SSH" | grep -E -q '^ssh-ed25519 +[A-Za-z0-9+/=]+'; then
+        echo "[!] Error: Invalid SSH public key format. Expected 'ssh-ed25519 AAAA...'."
+        exit 1
+    fi
     if ! grep -qF "$CLEAN_SSH" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
         echo "$CLEAN_SSH" >> "$HOME/.ssh/authorized_keys"
         chmod 600 "$HOME/.ssh/authorized_keys"
@@ -354,6 +394,12 @@ if [ -n "$CLEAN_SSH" ]; then
 fi
 
 if [ "$KEYS_ADDED" -eq 1 ]; then
+    # Verify Tor configuration before signaling daemon
+    if [ -x "$PREFIX/bin/tor" ] && ! "$PREFIX/bin/tor" --verify-config >/dev/null 2>&1; then
+        echo "[!] Error: tor --verify-config failed after adding authorization! Reverting..."
+        [ -n "$CLEAN_PUB" ] && rm -f "$AUTH_DIR/${CLIENT_NAME}.auth"
+        exit 1
+    fi
     # Signal Tor to reload authorization descriptors without dropping circuits
     if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; then
         su -c 'killall -HUP tor 2>/dev/null || pkill -HUP -x tor 2>/dev/null' || true
@@ -383,10 +429,15 @@ fi
 echo $$ > "$WATCHDOG_PID_FILE"
 
 get_current_ips() {
-    ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | sort | tr '\n' ' '
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 addr show 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | sort | tr '\n' ' '
+    else
+        ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | sort | tr '\n' ' '
+    fi
 }
 
 LAST_IPS=$(get_current_ips)
+LAST_SIGHUP=0
 
 while true; do
     sleep 8
@@ -398,7 +449,6 @@ while true; do
 
     # 2. Process supervision: ensure tor is running (dual-check: pidof + socket check)
     if ! pidof tor >/dev/null 2>&1 && ! (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
-        rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
         nohup $PREFIX/bin/tor > "$PREFIX/var/lib/tor/tor.log" 2>&1 &
         LAST_IPS=$(get_current_ips)
         termux-wake-lock 2>/dev/null || true
@@ -408,16 +458,36 @@ while true; do
     # 3. Dynamic IP / Network Interface Change Detection (Wi-Fi <-> Cellular / DHCP renew)
     CURRENT_IPS=$(get_current_ips)
     if [ -n "$CURRENT_IPS" ] && [ "$CURRENT_IPS" != "$LAST_IPS" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Network change detected ($LAST_IPS -> $CURRENT_IPS). Signaling Tor SIGHUP..." >> "$PREFIX/var/lib/tor/watchdog.log" 2>&1
-        LAST_IPS="$CURRENT_IPS"
-        # SIGHUP forces Tor to immediately tear down dead circuits and rebuild on new interface
-        pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
-        termux-wake-lock 2>/dev/null || true
+        NOW=$(date +%s)
+        # Bounded debounce: Do not signal SIGHUP more frequently than once every 20 seconds
+        if [ $((NOW - LAST_SIGHUP)) -ge 20 ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Network change detected ($LAST_IPS -> $CURRENT_IPS). Signaling Tor SIGHUP..." >> "$PREFIX/var/lib/tor/watchdog.log" 2>&1
+            LAST_IPS="$CURRENT_IPS"
+            LAST_SIGHUP="$NOW"
+            pkill -HUP -x tor 2>/dev/null || killall -HUP tor 2>/dev/null || true
+            termux-wake-lock 2>/dev/null || true
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Network shift flapping detected, debouncing SIGHUP ($((NOW - LAST_SIGHUP))s since last reload)..." >> "$PREFIX/var/lib/tor/watchdog.log" 2>&1
+            LAST_IPS="$CURRENT_IPS"
+        fi
     fi
 done
 EOF
 
-chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client" "$PREFIX/bin/watchdog-server"
+# 6f. reset-tor-state (Manual diagnostic recovery tool for Tor descriptor upload lockouts)
+cat << 'EOF' > "$PREFIX/bin/reset-tor-state"
+#!/data/data/com.termux/files/usr/bin/bash
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+echo "[*] Manual Tor State Recovery Tool"
+echo "[!] Caution: Resetting Tor state file clears descriptor rate limits but forces Tor to choose fresh Entry Guards."
+pkill -x tor 2>/dev/null || true
+rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
+sleep 1
+$PREFIX/bin/start-server
+echo "[+] Tor state purged and daemon restarted with fresh circuit state."
+EOF
+
+chmod 755 "$PREFIX/bin/start-server" "$PREFIX/bin/stop-server" "$PREFIX/bin/status-server" "$PREFIX/bin/restart-server" "$PREFIX/bin/authorize-client" "$PREFIX/bin/watchdog-server" "$PREFIX/bin/reset-tor-state"
 
 # 6f. Install master phone-server CLI tool
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -457,13 +527,15 @@ if command -v su >/dev/null 2>&1 && su -c "id" 2>/dev/null | grep -q "uid=0"; th
 fi
 
 # 7. Interactive Client Authorization Setup
-echo ""
-echo -e "${YELLOW}${BOLD}--- CLIENT AUTHORIZATION REGISTRATION ---${NC}"
-echo "To grant your PC or mobile device access to this server, register its generated keys."
-echo "If you haven't generated client keys yet, you can press Enter to skip and run 'authorize-client' later."
-echo ""
+if [ "${NON_INTERACTIVE:-0}" -ne 1 ]; then
+    echo ""
+    echo -e "${YELLOW}${BOLD}--- CLIENT AUTHORIZATION REGISTRATION ---${NC}"
+    echo "To grant your PC or mobile device access to this server, register its generated keys."
+    echo "If you haven't generated client keys yet, you can press Enter to skip and run 'authorize-client' later."
+    echo ""
 
-"$PREFIX/bin/authorize-client"
+    "$PREFIX/bin/authorize-client"
+fi
 
 # 8. Start Services and Obtain Onion Hostname
 echo ""

@@ -52,7 +52,21 @@ find_script() {
 
 # Auto-start local Tor proxy if inactive
 ensure_local_tor_active() {
+    local AUTH_DIR="/var/lib/tor/onion_auth"
+    [ "$IS_TERMUX" -eq 1 ] && AUTH_DIR="$PREFIX/var/lib/tor/onion_auth"
+
     if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
+        # Check if local Tor has client authorization configured
+        if [ "$IS_TERMUX" -eq 1 ]; then
+            if [ ! -d "$AUTH_DIR" ] || [ -z "$(ls -A "$AUTH_DIR" 2>/dev/null)" ]; then
+                echo -e "${YELLOW}[!] Notice: Client authorization directory ($AUTH_DIR) not found. Stealth onions may require authorization.${NC}"
+            fi
+        else
+            if [ -f "/etc/tor/torrc" ] && ! grep -q "^[[:space:]]*ClientOnionAuthDir" /etc/tor/torrc 2>/dev/null; then
+                echo -e "${YELLOW}[!] Notice: Local Tor is active on port 9050, but 'ClientOnionAuthDir' is not configured in /etc/tor/torrc.${NC}"
+                echo -e "${YELLOW}    If connecting to stealth onion services fails, run 'setup-client-linux.sh' to register authorization.${NC}"
+            fi
+        fi
         return 0
     fi
     echo -e "${YELLOW}[*] Local Tor proxy (127.0.0.1:9050) is inactive. Starting Tor...${NC}"
@@ -66,10 +80,18 @@ ensure_local_tor_active() {
             sleep 1
         done
     else
-        if command -v systemctl >/dev/null 2>&1; then
-            sudo systemctl start tor tor@default 2>/dev/null || true
-        elif command -v service >/dev/null 2>&1; then
-            sudo service tor start 2>/dev/null || true
+        if sudo -n true 2>/dev/null; then
+            if command -v systemctl >/dev/null 2>&1; then
+                sudo -n systemctl start tor tor@default 2>/dev/null || true
+            elif command -v service >/dev/null 2>&1; then
+                sudo -n service tor start 2>/dev/null || true
+            fi
+        else
+            # Start dedicated user-space Tor client without requiring sudo credentials
+            if command -v tor >/dev/null 2>&1; then
+                mkdir -p "$HOME/.local/share/tor"
+                nohup tor --DataDirectory "$HOME/.local/share/tor" --SocksPort 9050 >/dev/null 2>&1 &
+            fi
         fi
         for i in $(seq 1 10); do
             if (echo > /dev/tcp/127.0.0.1/9050) >/dev/null 2>&1; then
@@ -110,6 +132,8 @@ show_help() {
     echo "  restart                              Cleanly restart server daemons on phone"
     echo "  status                               Check local PIDs, socket states, and battery"
     echo "  authorize [name] [tor_pub] [ssh_pub] Register a new client device on server"
+    echo "  revoke [name]                        Revoke a client device authorization"
+    echo "  repair-tor                           Reset Tor state file & clear descriptor rate limits"
     echo "  setup server                         Run full server installer on Android Termux"
     echo ""
     echo -e "${BOLD}DASHBOARDS & UTILITIES:${NC}"
@@ -124,8 +148,8 @@ show_help() {
     echo "  phone-server connect                 # Log into phone server"
     echo "  phone-server status                  # Check phone server health"
     echo "  phone-server authorize laptop        # Authorize client keys on server"
-    echo "  phone-server client                  # Launch Client menu explicitly"
-    echo "  phone-server server                  # Launch Server menu explicitly"
+    echo "  phone-server revoke old-phone        # Revoke an old client device"
+    echo "  phone-server repair-tor              # Clear Tor descriptor rate limits if locked"
     echo "=================================================================="
 }
 
@@ -329,6 +353,38 @@ cmd_server_authorize() {
     else
         echo -e "${RED}[!] authorize-client not found. Run 'phone-server setup server' first.${NC}"
         return 1
+    fi
+}
+
+cmd_server_revoke() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        echo -e "${YELLOW}[!] Revocation requested from client. Attempting over Tor SSH...${NC}"
+        ssh -o ConnectTimeout=15 phone-server authorize-client --revoke "$@"
+        return $?
+    fi
+    if [ -x "$PREFIX/bin/authorize-client" ]; then
+        "$PREFIX/bin/authorize-client" --revoke "$@"
+    else
+        echo -e "${RED}[!] authorize-client not found.${NC}"
+        return 1
+    fi
+}
+
+cmd_server_repair_tor() {
+    if [ "$IS_TERMUX" -ne 1 ]; then
+        echo -e "${YELLOW}[!] Running Tor state repair on Phone Server over SSH...${NC}"
+        ssh -o ConnectTimeout=15 phone-server reset-tor-state "$@"
+        return $?
+    fi
+    if [ -x "$PREFIX/bin/reset-tor-state" ]; then
+        "$PREFIX/bin/reset-tor-state" "$@"
+    else
+        echo "[*] Purging transient Tor state files..."
+        pkill -x tor 2>/dev/null || true
+        rm -f "$PREFIX/var/lib/tor/state" "$PREFIX/tmp/state" 2>/dev/null || true
+        sleep 1
+        cmd_server_start
+        echo "[+] Done."
     fi
 }
 
@@ -608,6 +664,8 @@ case "$1" in
                 restart) shift; cmd_server_restart "$@" ;;
                 status) shift; cmd_server_status "$@" ;;
                 authorize|auth) shift; cmd_server_authorize "$@" ;;
+                revoke) shift; cmd_server_revoke "$@" ;;
+                repair-tor|reset-tor-state) shift; cmd_server_repair_tor "$@" ;;
                 setup) shift; cmd_setup server "$@" ;;
                 -h|--help|help) show_help ;;
                 *) echo -e "${RED}[!] Unknown server command: $1${NC}"; echo "Run 'phone-server --help' for available commands."; exit 1 ;;
@@ -650,6 +708,14 @@ case "$1" in
     authorize|auth)
         shift
         cmd_server_authorize "$@"
+        ;;
+    revoke)
+        shift
+        cmd_server_revoke "$@"
+        ;;
+    repair-tor|reset-tor-state)
+        shift
+        cmd_server_repair_tor "$@"
         ;;
     setup)
         shift
